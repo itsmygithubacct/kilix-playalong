@@ -47,7 +47,7 @@ def new_manifest(
     artist: str = "",
     model: str = "htdemucs_6s",
     language: str = "auto",
-    whisper_model: str = "small",
+    whisper_model: str = "auto",
     device: str = "auto",
     max_duration: float = 30 * 60,
     tuning: tuple[int, ...] = (40, 45, 50, 55, 59, 64),

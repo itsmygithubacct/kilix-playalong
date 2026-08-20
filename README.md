@@ -103,6 +103,12 @@ uv run kilix-playalong create 'https://youtu.be/VIDEO_ID' \
   --allow-model-downloads
 ```
 
+The default `--whisper-model auto` favors `large-v3` when CUDA or at least
+10 GiB of memory is available, then steps down through `large-v3-turbo`,
+`medium`, and `small` on tighter systems. Without model-download permission it
+uses the strongest compatible model already in the private cache. An explicit
+model name always overrides this selection.
+
 The create command prints the project id and printable export path. An
 interrupted project resumes from verified artifacts:
 

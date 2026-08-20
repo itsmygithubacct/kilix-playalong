@@ -63,7 +63,9 @@ def _pipeline_options(
     settings = manifest["settings"] if manifest is not None else {}
     language = arguments.language or _stored_text(settings, "language", "auto")
     model = arguments.model or _stored_text(settings, "separation_model", "htdemucs_6s")
-    whisper_model = arguments.whisper_model or _stored_text(settings, "whisper_model", "small")
+    whisper_model = arguments.whisper_model or _stored_text(
+        settings, "whisper_model", transcription.DEFAULT_MODEL
+    )
     device = arguments.device or _stored_text(settings, "device", "auto")
     max_duration = (
         arguments.max_duration_minutes * 60
@@ -217,7 +219,7 @@ def _common_pipeline_options(parser: argparse.ArgumentParser, *, resume: bool = 
     defaults: dict[str, object] = {
         "language": None if resume else "auto",
         "model": None if resume else "htdemucs_6s",
-        "whisper_model": None if resume else "small",
+        "whisper_model": None if resume else transcription.DEFAULT_MODEL,
         "device": None if resume else "auto",
         "tuning": None if resume else "standard",
         "max_fret": None if resume else 20,
@@ -237,8 +239,9 @@ def _common_pipeline_options(parser: argparse.ArgumentParser, *, resume: bool = 
     )
     parser.add_argument(
         "--whisper-model",
-        choices=tuple(sorted(transcription.SUPPORTED_MODELS)),
+        choices=tuple(sorted(transcription.MODEL_CHOICES)),
         default=defaults["whisper_model"],
+        help="lyrics model (default: auto chooses the strongest practical option)",
     )
     parser.add_argument(
         "--device",

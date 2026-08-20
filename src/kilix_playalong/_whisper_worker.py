@@ -13,7 +13,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("source", type=Path)
     parser.add_argument("output", type=Path)
-    parser.add_argument("--model", default="small")
+    parser.add_argument("--model", default="large-v3")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--language")
     parser.add_argument("--cache", type=Path, required=True)

@@ -54,7 +54,7 @@ class PipelineOptions:
     language: str = "auto"
     lyrics_path: Path | None = None
     model: str = "htdemucs_6s"
-    whisper_model: str = "small"
+    whisper_model: str = transcription.DEFAULT_MODEL
     device: str = "auto"
     max_duration: float = 30 * 60
     max_fret: int = 20
@@ -71,7 +71,7 @@ def _validate_options(options: PipelineOptions, *, require_rights: bool) -> None
         raise InvalidInputError("language must be 'auto' or a short BCP 47 language tag")
     if options.model not in separation.SUPPORTED_MODELS:
         raise InvalidInputError("unsupported Demucs model")
-    if options.whisper_model not in transcription.SUPPORTED_MODELS:
+    if options.whisper_model not in transcription.MODEL_CHOICES:
         raise InvalidInputError("unsupported faster-whisper model")
     if options.device not in {"auto", "cpu", "cuda"}:
         raise InvalidInputError("device must be auto, cpu, or cuda")
@@ -351,8 +351,8 @@ class Pipeline:
                 device=self.options.device,
                 allow_model_downloads=self.options.allow_model_downloads,
             )
-            source = f"faster-whisper:{self.options.whisper_model}"
-            language = self.options.language
+            cues, source, language = load_lyrics(output, duration=duration)
+            write_lyrics(output, cues, source=source, language=language)
         self.manifest["lyrics"] = {
             "path": output.relative_to(self.project_dir).as_posix(),
             "source": source,
