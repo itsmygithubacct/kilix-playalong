@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kilix Playalong</title>
+  <link rel="stylesheet" href="static/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to play-along</a>
+  <div class="shell" id="app">
+    <header class="site-header">
+      <div class="brand-lockup" aria-label="Kilix Playalong">
+        <span class="brand-mark" aria-hidden="true">K/</span>
+        <span>
+          <span class="eyebrow">Kilix / practice studio</span>
+          <span class="brand-name">Playalong</span>
+        </span>
+      </div>
+      <div class="header-actions">
+        <span class="connection-pill" id="connection-status" role="status" aria-live="polite">
+          <span class="status-dot" aria-hidden="true"></span>
+          Loading project
+        </span>
+        <button class="button button-quiet" id="print-button" type="button" hidden>Print</button>
+        <a class="button button-quiet" id="printable-link" href="#" target="_blank" rel="noopener" hidden>
+          Printable mode
+        </a>
+      </div>
+    </header>
+
+    <main id="main-content" tabindex="-1">
+      <section class="state-card" id="loading-state" aria-labelledby="loading-title">
+        <div class="state-orbit" aria-hidden="true"><span></span><span></span><span></span></div>
+        <p class="eyebrow">Preparing your session</p>
+        <h1 id="loading-title">Loading play-along data</h1>
+        <p class="muted" id="loading-message">Reading the project manifest and arranging its tracks.</p>
+      </section>
+
+      <section class="state-card state-card-error" id="error-state" aria-labelledby="error-title" hidden>
+        <span class="state-icon" aria-hidden="true">!</span>
+        <p class="eyebrow">Could not open this session</p>
+        <h1 id="error-title">The play-along is unavailable</h1>
+        <p class="muted" id="error-message">The project API returned an unexpected response.</p>
+        <button class="button button-primary" id="retry-button" type="button">Try again</button>
+      </section>
+
+      <section class="state-card" id="empty-state" aria-labelledby="empty-title" hidden>
+        <span class="state-icon state-icon-soft" aria-hidden="true">♪</span>
+        <p class="eyebrow">Nothing to play yet</p>
+        <h1 id="empty-title">This project has no playable audio tracks</h1>
+        <p class="muted" id="empty-message">Return to the creator and add an audio artifact before opening the player.</p>
+      </section>
+
+      <section id="player-shell" hidden>
+        <section class="project-hero" aria-labelledby="project-title">
+          <div class="hero-signal" aria-hidden="true">
+            <span class="signal-bar signal-bar-one"></span>
+            <span class="signal-bar signal-bar-two"></span>
+            <span class="signal-bar signal-bar-three"></span>
+            <span class="signal-bar signal-bar-four"></span>
+            <span class="signal-bar signal-bar-five"></span>
+          </div>
+          <div class="hero-copy">
+            <p class="eyebrow" id="project-kicker">Local play-along</p>
+            <h1 id="project-title">Untitled practice session</h1>
+            <p class="hero-subtitle" id="project-artist">Artist not provided</p>
+            <p class="honesty-note">
+              Generated timing and fingering are practice drafts. Listen, adjust, and trust your ears.
+            </p>
+          </div>
+          <div class="hero-meta" aria-label="Project details">
+            <span class="meta-label">Duration</span>
+            <strong id="hero-duration">--:--</strong>
+            <span class="meta-label">Source</span>
+            <strong>Private local project</strong>
+          </div>
+        </section>
+
+        <div class="notice-bar" id="inline-notice" role="status" aria-live="polite" hidden></div>
+
+        <section class="workspace" aria-label="Play-along workspace">
+          <aside class="control-rail" aria-label="Playback and track controls">
+            <section class="control-section transport-section" aria-labelledby="transport-title">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Transport</p>
+                  <h2 id="transport-title">Stay in the pocket</h2>
+                </div>
+                <span class="tempo-badge" id="transport-state">Ready</span>
+              </div>
+              <div class="transport-buttons">
+                <button class="icon-button" id="back-five" type="button" aria-label="Seek back five seconds" title="Back 5 seconds">−5</button>
+                <button class="play-button" id="play-button" type="button" aria-label="Play" title="Play (Space)">
+                  <span class="play-glyph" aria-hidden="true">▶</span>
+                  <span class="sr-only">Play</span>
+                </button>
+                <button class="icon-button" id="forward-five" type="button" aria-label="Seek forward five seconds" title="Forward 5 seconds">+5</button>
+              </div>
+              <div class="timeline-wrap">
+                <label class="sr-only" for="timeline">Playback position</label>
+                <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" disabled>
+                <div class="timeline-times" aria-hidden="true">
+                  <span id="elapsed-time">00:00</span>
+                  <span id="remaining-time">--:--</span>
+                </div>
+              </div>
+              <div class="transport-options">
+                <label class="select-label" for="playback-rate">Speed
+                  <select id="playback-rate">
+                    <option value="0.5">0.5×</option>
+                    <option value="0.75">0.75×</option>
+                    <option value="1" selected>1×</option>
+                    <option value="1.25">1.25×</option>
+                    <option value="1.5">1.5×</option>
+                  </select>
+                </label>
+                <button class="button button-small" id="reset-position" type="button">Back to start</button>
+              </div>
+            </section>
+
+            <section class="control-section" aria-labelledby="tracks-title">
+              <div class="section-heading section-heading-tight">
+                <div>
+                  <p class="eyebrow">Soundboard</p>
+                  <h2 id="tracks-title">Tracks</h2>
+                </div>
+              </div>
+              <div class="track-list" id="track-list" aria-live="polite">
+                <p class="muted small-copy">Loading stems…</p>
+              </div>
+            </section>
+
+            <section class="control-section" aria-labelledby="layers-title">
+              <div class="section-heading section-heading-tight">
+                <div>
+                  <p class="eyebrow">Practice layers</p>
+                  <h2 id="layers-title">Focus</h2>
+                </div>
+              </div>
+              <div class="focus-controls">
+                <button class="toggle-button is-on" id="toggle-vocals" type="button" aria-pressed="true">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Guide vocals</span>
+                </button>
+                <button class="toggle-button is-on" id="toggle-lyrics" type="button" aria-pressed="true">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Lyrics on screen</span>
+                </button>
+              </div>
+            </section>
+
+            <section class="shortcut-card" aria-labelledby="shortcuts-title">
+              <p class="eyebrow" id="shortcuts-title">Shortcuts</p>
+              <p><kbd>Space</kbd> play / pause</p>
+              <p><kbd>←</kbd> <kbd>→</kbd> seek 5 seconds</p>
+              <p><kbd>V</kbd> vocals · <kbd>L</kbd> lyrics</p>
+              <p><kbd>−</kbd> <kbd>+</kbd> nudge position</p>
+              <p class="muted small-copy">Shortcuts pause inside buttons, fields, and menus.</p>
+            </section>
+          </aside>
+
+          <div class="practice-stage">
+            <section class="stage-card lyrics-card" id="lyrics-card" aria-labelledby="lyrics-title">
+              <div class="stage-heading">
+                <div>
+                  <p class="eyebrow">Timed lyrics</p>
+                  <h2 id="lyrics-title">Sing along</h2>
+                </div>
+                <span class="stage-status" id="lyrics-status">Waiting for timing</span>
+              </div>
+              <div class="lyrics-viewport" id="lyrics-viewport">
+                <ol class="lyrics-list" id="lyrics-list" aria-live="off"></ol>
+                <div class="content-empty" id="lyrics-empty" hidden>
+                  <strong>No timed lyrics loaded</strong>
+                  <span>Supply lyrics or an alignment artifact to see the current line here.</span>
+                </div>
+              </div>
+            </section>
+
+            <section class="stage-card tab-card" id="tab-card" aria-labelledby="tab-title">
+              <div class="stage-heading">
+                <div>
+                  <p class="eyebrow">Instrument lane</p>
+                  <h2 id="tab-title">Guitar tab</h2>
+                </div>
+                <span class="stage-status" id="tab-status">Waiting for tab</span>
+              </div>
+              <div class="tab-viewport" id="tab-viewport" tabindex="0" aria-label="Rolling guitar tablature">
+                <div class="tab-playhead" aria-hidden="true"></div>
+                <div class="tab-grid" id="tab-grid"></div>
+                <div class="content-empty" id="tab-empty" hidden>
+                  <strong>No tab events loaded</strong>
+                  <span>Imported or inferred tab will follow the playback cursor here.</span>
+                </div>
+              </div>
+              <div class="tab-footer">
+                <span id="tuning-label">Standard tuning</span>
+                <span id="fret-label">Max fret --</span>
+                <span id="tab-position" class="tab-position">Waiting for playback</span>
+              </div>
+            </section>
+
+            <section class="download-card" aria-labelledby="downloads-title">
+              <div>
+                <p class="eyebrow">Take it with you</p>
+                <h2 id="downloads-title">Practice exports</h2>
+                <p class="muted small-copy">Exports reflect the current project draft and may need musical cleanup.</p>
+              </div>
+              <div class="download-actions">
+                <a class="button button-secondary" id="ascii-download" href="#" download hidden>ASCII tab</a>
+                <a class="button button-secondary" id="midi-download" href="#" download hidden>MIDI</a>
+              </div>
+            </section>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <span>Kilix Playalong · local-first practice</span>
+      <span>Audio stays in this session.</span>
+    </footer>
+  </div>
+  <script src="static/app.js" defer></script>
+</body>
+</html>
