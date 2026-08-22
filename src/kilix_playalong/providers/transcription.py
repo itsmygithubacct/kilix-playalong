@@ -212,7 +212,11 @@ def transcribe(
     ]
     if language != "auto":
         arguments.extend(("--language", language))
-    environment = {"HF_HUB_DISABLE_TELEMETRY": "1", "HF_HOME": str(model_cache)}
+    environment = {
+        "HF_HUB_DISABLE_TELEMETRY": "1",
+        "HF_HOME": str(model_cache),
+        "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+    }
     if not allow_model_downloads:
         environment["HF_HUB_OFFLINE"] = "1"
         offline_proxy = "http://127.0.0.1:9"

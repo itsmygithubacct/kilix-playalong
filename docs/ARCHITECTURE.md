@@ -22,9 +22,11 @@ when its fingerprint and every artifact still match. A changed input or setting
 invalidates the affected stage and all downstream stages.
 
 Provider calls run as argument vectors without a shell, in separate process
-groups with timeouts, bounded diagnostics, private caches, and path/URL
+groups with timeouts, incrementally bounded diagnostics, private caches, a
+minimal allowlisted environment, a disposable private home, and path/URL
 redaction. The optional heavyweight Python providers run in child interpreters
-so their imports and failures do not destabilize the command process.
+so their imports and failures do not destabilize the command process. Provider
+wrappers must pass any required cache or module path explicitly.
 
 ## Private project data
 

@@ -9,6 +9,8 @@ from pathlib import Path
 from ..errors import ProviderUnavailableError
 from ..runner import run_command
 
+_SOURCE_ROOT = str(Path(__file__).resolve().parents[2])
+
 
 def is_available() -> bool:
     return importlib.util.find_spec("basic_pitch") is not None
@@ -36,6 +38,7 @@ def transcribe(
             str(notes_output),
         ],
         timeout=timeout,
+        env={"PYTHONPATH": _SOURCE_ROOT},
         redact=(str(source), str(midi_output), str(notes_output)),
     )
     midi_output.chmod(0o600)

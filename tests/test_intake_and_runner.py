@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -87,3 +89,56 @@ def test_runner_enforces_diagnostic_bound() -> None:
             timeout=5,
             max_output=32,
         )
+
+
+def test_runner_uses_private_allowlisted_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KILIX_PLAYALONG_SENTINEL_TOKEN", "do-not-inherit")
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:secret@proxy.invalid")
+    monkeypatch.setenv("PYTHONPATH", "/tmp/untrusted-python")
+    parent_home = os.environ.get("HOME")
+    script = (
+        "import json, os; "
+        "print(json.dumps({"
+        "'token': os.environ.get('KILIX_PLAYALONG_SENTINEL_TOKEN'), "
+        "'proxy': os.environ.get('HTTPS_PROXY'), "
+        "'pythonpath': os.environ.get('PYTHONPATH'), "
+        "'explicit': os.environ.get('KILIX_EXPLICIT_TEST'), "
+        "'home': os.environ.get('HOME')}))"
+    )
+    result = run_command(
+        [sys.executable, "-c", script],
+        timeout=5,
+        env={"KILIX_EXPLICIT_TEST": "kept"},
+    )
+    child = json.loads(result.stdout)
+    assert child["token"] is None
+    assert child["proxy"] is None
+    assert child["pythonpath"] is None
+    assert child["explicit"] == "kept"
+    assert child["home"] != parent_home
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"BAD=NAME": "x"},
+        {"VÄR": "x"},
+        {"GOOD_NAME": "bad\x00value"},
+        {"HOME": "/tmp/not-the-provider-home"},
+    ],
+)
+def test_runner_rejects_invalid_explicit_environment(environment: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="provider environment"):
+        run_command([sys.executable, "-c", "pass"], timeout=5, env=environment)
+
+
+def test_runner_terminates_timed_out_provider() -> None:
+    started = time.monotonic()
+    with pytest.raises(ProviderFailedError, match="timed out"):
+        run_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            timeout=0.05,
+        )
+    assert time.monotonic() - started < 10

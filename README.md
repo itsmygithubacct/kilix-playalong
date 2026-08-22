@@ -45,7 +45,9 @@ The player binds to `127.0.0.1` only, uses a random per-launch capability in its
 URL, validates the HTTP Host header, exposes a read-only route set, and sends a
 restrictive Content Security Policy. URLs and local paths are redacted from
 provider errors. No cookies, browser profiles, credentials, or DRM-bypass options
-are passed to `yt-dlp`.
+are passed to `yt-dlp`. Every provider receives a minimal allowlisted environment
+and a disposable private home directory, so unrelated session credentials and
+Python import paths do not cross the worker boundary.
 
 YouTube access and model downloads remain network operations governed by their
 providers' current terms. Model code licenses do not automatically establish
