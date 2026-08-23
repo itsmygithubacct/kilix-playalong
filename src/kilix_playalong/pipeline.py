@@ -6,7 +6,7 @@ import math
 import re
 import shutil
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,7 +19,13 @@ from .errors import (
 from .export import render_printable
 from .lyrics import choose_subtitle, load_lyrics, write_lyrics
 from .midi import load_note_events, validate_midi
-from .paths import ensure_private_directory, project_artifact, project_directory, projects_home
+from .paths import (
+    cache_home,
+    ensure_private_directory,
+    project_artifact,
+    project_directory,
+    projects_home,
+)
 from .providers import basic_pitch, media, separation, transcription, youtube
 from .state import (
     STAGE_NAMES,
@@ -44,6 +50,42 @@ from .util import (
 
 RIGHTS_STATEMENT = "I confirmed that I have permission to process this media and its lyrics."
 _LANGUAGE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$")
+_WHISPER_SOURCE_PREFIX = "faster-whisper:"
+# Best-first mirrors of the transcription provider's private adaptive policy: its
+# `_QUALITY_ORDER` and the device rule at the head of its `_auto_candidates`. They are only
+# ever used to rank a *recorded* configuration against the one this machine would pick now;
+# the provider itself still owns every real selection. Drift is bounded by a named check --
+# test_whisper_policy_mirrors_the_transcription_provider fails if the provider reorders its
+# candidates or changes how `auto` picks a device, instead of this module silently keying on
+# a stale ranking and never firing an upgrade again.
+_WHISPER_QUALITY_ORDER = ("large-v3", "large-v3-turbo", "medium", "small")
+_WHISPER_DEVICE_ORDER = ("cuda", "cpu")
+
+
+def _whisper_model_cache() -> Path:
+    """Mirror the private model cache that the faster-whisper provider hands its worker."""
+    return cache_home() / "faster-whisper"
+
+
+def _recorded_whisper_model(manifest: ProjectManifest) -> str | None:
+    """Return the Whisper model that produced a project's lyrics, if one did."""
+    lyrics = manifest["lyrics"]
+    source = lyrics.get("source") if isinstance(lyrics, dict) else None
+    if not isinstance(source, str) or not source.startswith(_WHISPER_SOURCE_PREFIX):
+        return None
+    return source[len(_WHISPER_SOURCE_PREFIX) :]
+
+
+def _no_worse_than(order: tuple[str, ...], value: str) -> tuple[str, ...]:
+    """Return the members of a best-first order that are at least as good as ``value``.
+
+    ``value`` must be a member of ``order``. Both callers only ever ask about a value the
+    provider's own policy produced -- a model it resolved from `auto`, or the `cuda`/`cpu`
+    that `auto` landed on -- so an unranked value never reaches here. The separate rule that
+    keeps an explicitly requested model comparable only with itself lives at the call site in
+    `_whisper_keys`, which does not consult this order at all in that case.
+    """
+    return order[: order.index(value) + 1]
 
 
 @dataclass(frozen=True)
@@ -157,16 +199,36 @@ class Pipeline:
         action: Callable[[], tuple[list[Path], str]],
         *,
         inputs: object,
+        alternates: Sequence[object] = (),
     ) -> None:
-        fingerprint = sha256_bytes(canonical_json({"provider": provider, "inputs": inputs}))
-        if stage_is_current(
-            self.project_dir,
-            self.manifest,
-            name,
-            fingerprint=fingerprint,
-        ):
-            self.progress(name, "cached")
-            return
+        """Run a stage unless a recorded fingerprint already covers it.
+
+        ``inputs`` describes the configuration this run would use, and is the only value a
+        finished stage ever records -- so a stage always converges on the key it actually ran
+        with, and no stage needs a second pass to settle. ``alternates`` are configurations
+        whose recorded artifact is good enough to keep instead of re-running. A match on one
+        of them keeps the recorded fingerprint exactly as it is: rewriting it to ``inputs``
+        would erase the better configuration the artifact was really made with, and the next
+        run on a recovered machine would re-do work it already has. That asymmetry --
+        accepted, never written -- is what makes invalidation one-directional for the
+        adaptive lyrics stage (see ``_whisper_keys``).
+        """
+
+        def fingerprint_of(value: object) -> str:
+            return sha256_bytes(canonical_json({"provider": provider, "inputs": value}))
+
+        fingerprint = fingerprint_of(inputs)
+        # stage_is_current only re-digests artifacts once a fingerprint matches, and these
+        # candidates are distinct, so at most one of them costs a digest pass.
+        for candidate in (fingerprint, *(fingerprint_of(value) for value in alternates)):
+            if stage_is_current(
+                self.project_dir,
+                self.manifest,
+                name,
+                fingerprint=candidate,
+            ):
+                self.progress(name, "cached")
+                return
         self._invalidate_from(name)
         begin_stage(self.manifest, name, provider, fingerprint=fingerprint)
         self._save()
@@ -197,21 +259,26 @@ class Pipeline:
             },
         )
         self._run_stage("normalize", "ffmpeg:pcm-s16le-44100-stereo", self._normalize, inputs={})
+        # Known gap, deliberately not closed here: this key stores the raw `device` option, so
+        # `auto` silently resolving differently after the hardware changes leaves the stems
+        # reported as cached -- the same class of staleness the lyrics key below now catches.
+        # Closing it needs a cheap "is a CUDA device present" probe that only `separation.py`
+        # can supply; deciding it here would mean importing torch into the orchestrator on
+        # every run, which is exactly the isolation f5ceb99 established. Flagged for that
+        # module's owner rather than papered over.
         self._run_stage(
             "separate",
             f"demucs:{self.options.model}@eeac1d1",
             self._separate,
             inputs={"model": self.options.model, "device": self.options.device},
         )
+        whisper, whisper_alternates = self._whisper_keys()
         self._run_stage(
             "lyrics",
             "captions-or-faster-whisper",
             self._lyrics,
-            inputs={
-                "language": self.options.language,
-                "whisper_model": self.options.whisper_model,
-                "lyrics_input_sha256": self.manifest["source"].get("lyrics_input_sha256"),
-            },
+            inputs=self._lyrics_inputs(whisper),
+            alternates=[self._lyrics_inputs(value) for value in whisper_alternates],
         )
         self._run_stage(
             "transcribe-guitar",
@@ -321,28 +388,159 @@ class Pipeline:
         self.manifest["tracks"] = tracks
         return list(outputs.values()), f"{len(outputs)} independently controllable stems"
 
+    def _lyrics_file(self) -> Path | None:
+        """Return the supplied or downloaded lyrics file the stage prefers, if any."""
+        if self.options.lyrics_path is not None:
+            return self.options.lyrics_path
+        # A supplied lyrics file is copied into the project, so later resumes keep using it
+        # without --lyrics and the stage key may read its digest back from the manifest.
+        stored_lyrics = self.manifest["source"].get("lyrics_input_path")
+        if isinstance(stored_lyrics, str):
+            return project_artifact(self.project_dir, stored_lyrics)
+        raw_paths = self.manifest["source"].get("subtitle_paths", [])
+        if not isinstance(raw_paths, list):
+            raise ProviderFailedError("project subtitle paths are invalid")
+        paths = [
+            project_artifact(self.project_dir, value)
+            for value in raw_paths
+            if isinstance(value, str)
+        ]
+        return choose_subtitle(paths, self.options.language)
+
+    def _resolved_whisper_device(self) -> str:
+        """Report the device `auto` will actually land on, mirroring `_auto_candidates`.
+
+        The raw option is not enough for the stage key: `auto` on a machine that has since
+        gained a GPU keeps the same option string while the worker switches backend and
+        compute type, which is the "adaptive resolution changed" staleness the lyrics key
+        exists to catch.
+        """
+        if self.options.device != "auto":
+            return self.options.device
+        return "cuda" if transcription._cuda_available() else "cpu"
+
+    def _whisper_configuration(self) -> tuple[str, str]:
+        """Resolve (model, device) exactly as the provider will when the stage runs.
+
+        Deciding whether `auto` now resolves better than the recorded run means asking this
+        machine, so a resume that turns out to be a no-op still costs the provider's memory
+        and CUDA probes in this process. That is the price of catching the upgrade at all; the
+        probes are skipped entirely when the lyrics come from a file and when both
+        `--whisper-model` and `--device` are pinned, and the heavy work -- weights, inference,
+        torch -- still happens only in the worker subprocess.
+        """
+        model = transcription.resolve_model(
+            self.options.whisper_model,
+            device=self.options.device,
+            model_cache=_whisper_model_cache(),
+            allow_model_downloads=self.options.allow_model_downloads,
+        )
+        return model, self._resolved_whisper_device()
+
+    def _whisper_keys(self) -> tuple[dict[str, str] | None, tuple[dict[str, str], ...]]:
+        """Return the lyrics stage's Whisper key and the recorded keys still good enough.
+
+        The key names the configuration this run would hand the worker -- resolved, never the
+        raw option -- so a finished stage records what actually produced its lyrics and a
+        repeat run keys identically. A recorded configuration is additionally accepted when it
+        is *at least as good*, and "as good" ranks the whole ``(model, device)`` pair rather
+        than each dimension on its own: the model decides first, the device only between
+        equal models. The model is what a transcript is made of and the device only how fast
+        it was made, so a strictly better recorded model is kept even from the worse device.
+
+        What that guarantees, for the dimensions left on `auto`: a machine that shrank (RAM
+        gone, GPU gone, weights evicted) keeps its transcript, and so does one that shrank on
+        the model while growing a GPU -- `auto` resolving to (medium, cuda) never discards a
+        recorded (large-v3, cpu). A re-run happens only when the pair this machine resolves
+        strictly outranks the recorded one, and it records the pair it ran; from then on, with
+        these options fixed, the recorded pair only ever ascends a finite ordering, so the
+        stage settles and cannot alternate between two configurations. A dimension the caller
+        pinned accepts only itself and does not relax the other one, so `--whisper-model` and
+        `--device` mean exactly what they say in both directions -- including the single
+        re-run that pinning something other than the recording costs.
+
+        This is a keying decision only. Which model the worker is handed stays the provider's
+        call in `_lyrics`: the accepted set here is deliberately allowed to outrank what this
+        machine can run, and nothing that is may be allowed to choose the run.
+        """
+        try:
+            configuration = (
+                None if self._lyrics_file() is not None else self._whisper_configuration()
+            )
+        except PlayalongError:
+            return self._undecidable_whisper_keys()
+        if configuration is None:
+            return None, ()
+        model, device = configuration
+        # The `else` branch is the whole of the explicit-model rule: a requested model is
+        # comparable only with itself, whether or not the adaptive order happens to rank it.
+        models = (
+            _no_worse_than(_WHISPER_QUALITY_ORDER, model)
+            if self.options.whisper_model == transcription.AUTO_MODEL
+            else (model,)
+        )
+        devices = (
+            _no_worse_than(_WHISPER_DEVICE_ORDER, device)
+            if self.options.device == "auto"
+            else (device,)
+        )
+        # Pairs, ranked model-major -- not each dimension separately. Componentwise, a
+        # machine that gains a GPU while its large-v3 weights are pruned resolves to
+        # (medium, cuda) and matches the recorded (large-v3, cpu) on neither dimension, so a
+        # finished better transcript would be replaced by a worse one and every later stage
+        # re-run. A strictly better model is therefore accepted from either device wherever
+        # the device is still `auto`; an equal model falls to the device rule unchanged,
+        # which is what keeps a GPU appearing an upgrade.
+        return {"model": model, "device": device}, tuple(
+            {"model": candidate, "device": backend}
+            for candidate in models
+            for backend in (
+                _WHISPER_DEVICE_ORDER
+                if candidate != model and self.options.device == "auto"
+                else devices
+            )
+            if (candidate, backend) != (model, device)
+        )
+
+    def _undecidable_whisper_keys(self) -> tuple[dict[str, str], tuple[dict[str, str], ...]]:
+        """Return keys for a machine whose Whisper configuration will not resolve at all.
+
+        Nothing can be transcribed here, so this run cannot improve on what is recorded:
+        accept the model that produced the existing lyrics under either device -- the device
+        it ran on is not recorded, and no run that could distinguish them is possible now --
+        and let the stage itself surface the provider's diagnostic if it has to run anyway.
+        """
+        recorded = _recorded_whisper_model(self.manifest)
+        if recorded is None:
+            return {"model": self.options.whisper_model, "device": self.options.device}, ()
+        return (
+            {"model": recorded, "device": _WHISPER_DEVICE_ORDER[0]},
+            tuple({"model": recorded, "device": value} for value in _WHISPER_DEVICE_ORDER[1:]),
+        )
+
+    def _lyrics_inputs(self, whisper: dict[str, str] | None) -> dict[str, object]:
+        """Describe the lyrics stage under one candidate Whisper configuration."""
+        return {
+            "language": self.options.language,
+            "lyrics_input_sha256": self.manifest["source"].get("lyrics_input_sha256"),
+            "whisper": whisper,
+        }
+
     def _lyrics(self) -> tuple[list[Path], str]:
         output = self.project_dir / "lyrics" / "lyrics.json"
         duration = self._duration()
-        selected: Path | None = self.options.lyrics_path
-        stored_lyrics = self.manifest["source"].get("lyrics_input_path")
-        if selected is None and isinstance(stored_lyrics, str):
-            selected = project_artifact(self.project_dir, stored_lyrics)
-        if selected is None:
-            raw_paths = self.manifest["source"].get("subtitle_paths", [])
-            if not isinstance(raw_paths, list):
-                raise ProviderFailedError("project subtitle paths are invalid")
-            paths = [
-                project_artifact(self.project_dir, value)
-                for value in raw_paths
-                if isinstance(value, str)
-            ]
-            selected = choose_subtitle(paths, self.options.language)
+        selected = self._lyrics_file()
         if selected is not None:
             cues, source, language = load_lyrics(selected, duration=duration)
             write_lyrics(output, cues, source=source, language=language)
         else:
             vocals = self._track_path("vocals")
+            # The request goes to the provider unresolved on purpose. `_whisper_keys` resolves
+            # the same call to key the stage, but keying may accept a recorded model this
+            # machine can no longer run and the run may not: only the provider applies its
+            # memory policy and its cached-weights check, and only it reports a missing
+            # `transcribe` extra before resolving any model at all. Re-resolving in the parent
+            # would also open a window between the parent's answer and the worker's.
             transcription.transcribe(
                 vocals,
                 output,

@@ -19,7 +19,24 @@ from .paths import project_artifact
 from .state import load_manifest
 from .types import ProjectManifest
 
-_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+# 19 digits is the widest byte-position any file can have; the bound keeps an
+# attacker's digits out of int(). RFC 7233 does permit leading zeros, so a
+# byte-position padded past 19 digits gets a 416 rather than a 206 -- no client
+# emits one, and 416 is what this module already returns for any Range it
+# cannot parse. Every int() below is inside this bound; there is no other.
+_RANGE = re.compile(r"^bytes=(\d{0,19})-(\d{0,19})$")
+# The policy every reply gets unless the route widens it, including the stdlib's
+# own send_error pages, which are generated before any route runs.
+_STRICT_POLICY = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+# BaseHTTPRequestHandler leaves timeout unset, so a client that connects and then
+# stalls holds a handler thread for as long as it likes -- and the request line and
+# header block are read before any route runs, so it need not hold the capability
+# token to do it. This bounds that read phase only: parse_request() lifts it as soon
+# as the header block is in, because a whole-connection timeout would silently truncate a
+# browser that pauses a media stream mid-file. The only writes still inside the
+# bound are the stdlib's own one-line errors for a request line rejected before
+# parse_request (414), never a served file. Loopback keeps the reach local either way.
+_HEADER_READ_TIMEOUT = 10.0
 
 
 @dataclass(frozen=True)
@@ -95,14 +112,86 @@ def _handler(
         "tab": ServedFile(optional_artifact(tablature, "path"), "application/json"),
     }
     web_root = importlib.resources.files("kilix_playalong").joinpath("web")
+    # ASCII by construction (secrets.token_urlsafe). A non-ASCII token now fails
+    # here instead of building a prefix that could never match.
+    capability_prefix = f"/{token}/".encode("ascii")
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "KilixPlayalong/0.1"
+        # send_error() replies are unauthenticated, so they are made to look like
+        # _reject()'s: text/plain, "<code> <phrase>". Interpolating %(message)s is
+        # only safe because send_error() below forces it to the status code's own
+        # phrase -- the two must change together, and
+        # test_pre_auth_error_replies_carry_the_security_headers fails if they do not.
+        error_content_type = "text/plain; charset=utf-8"
+        error_message_format = "%(code)d %(message)s\n"
+        # The CSP for the reply being built. end_headers() reads it, so a reply that
+        # never reaches a route -- every send_error page -- still gets the strict one.
+        response_policy = _STRICT_POLICY
+
+        # socketserver's setup() applies this to the connection before the request
+        # line is read; parse_request() lifts it once the header block is in.
+        timeout = _HEADER_READ_TIMEOUT
 
         def log_message(self, _format: str, *_arguments: object) -> None:
             return
 
-        def _security_headers(self, content_security_policy: str) -> None:
+        def version_string(self) -> str:
+            return self.server_version
+
+        def parse_request(self) -> bool:
+            parsed = super().parse_request()
+            # The read phase the timeout bounds is over, whether the request parsed
+            # or was rejected. A body write must not inherit it: the stdlib swallows
+            # a socket timeout, so a paused stream would truncate with no trace.
+            self.connection.settimeout(None)
+            return parsed
+
+        def send_error(
+            self,
+            code: int,
+            message: str | None = None,
+            explain: str | None = None,
+        ) -> None:
+            # The stdlib passes the offending method or request line as `message`,
+            # which lands in the reason phrase and the body. Drop it for the status
+            # code's own phrase: an unauthenticated reply echoes nothing.
+            super().send_error(code, None, explain)
+
+        # A client that seeks or closes a tab resets the connection mid-write. That is
+        # routine, not a fault, and letting it reach handle_error buries real tracebacks.
+        # The catch is scoped by exception TYPE, not by which socket raised it, so it is
+        # sound only while nothing under a request can raise a ConnectionError of its
+        # own: no code on this request path -- this handler or _payload -- opens an
+        # outbound connection, subprocess pipe or HTTP client, so every ConnectionError
+        # here comes from this client connection. That invariant is not left to the
+        # reader: test_request_handling_opens_no_outbound_connections fails if a denied
+        # name appears in the parsed tree of _handler or of _payload, which together
+        # are this module's whole request path. Below them run only stdlib calls that
+        # touch the filesystem or nothing at all (json, pathlib, importlib.resources,
+        # re, secrets); the check does not read those, and what bounds them is that
+        # none of them opens a socket, not a test.
+        def handle_one_request(self) -> None:
+            # protocol_version is HTTP/1.0, so close_connection is always True and one
+            # instance serves exactly one reply. The reset is what keeps that true of
+            # the policy if a later change ever lets a connection carry a second.
+            self.response_policy = type(self).response_policy
+            try:
+                super().handle_one_request()
+            except ConnectionError:
+                self.close_connection = True
+
+        def end_headers(self) -> None:
+            # The seam every reply with a status line passes through -- hand-written
+            # ones and the stdlib's send_error pages alike. It is a no-op for an
+            # HTTP/0.9 reply, where CPython emits the body alone: a 2-word request
+            # line is routed normally and ships its bytes bare, and so does an error
+            # for a request line whose version never parsed. (The 414 for an over-long
+            # line is not in that class: handle_one_request assigns request_version
+            # itself, so that reply is armoured like the rest.) That surface is
+            # bounded, not closed -- without the capability token it yields only a
+            # one-line plain-text error, and no browser emits an HTTP/0.9 request
+            # line. Pinned by test_http_0_9_replies_ship_bare_bodies_bounded_by_the_token.
             self.send_header("Cache-Control", "no-store")
             self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("X-Content-Type-Options", "nosniff")
@@ -112,17 +201,18 @@ def _handler(
                 "Permissions-Policy",
                 "accelerometer=(), camera=(), geolocation=(), microphone=()",
             )
-            self.send_header("Content-Security-Policy", content_security_policy)
+            self.send_header("Content-Security-Policy", self.response_policy)
+            super().end_headers()
 
         def _headers(self, status: HTTPStatus, content_type: str, length: int) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(length))
-            self._security_headers(
+            self.response_policy = (
                 "default-src 'self'; base-uri 'none'; form-action 'none'; "
                 "frame-ancestors 'none'; script-src 'self'; style-src 'self'; "
                 "media-src 'self'; connect-src 'self'; img-src 'self' data:; "
-                "object-src 'none'",
+                "object-src 'none'"
             )
             self.end_headers()
 
@@ -134,7 +224,16 @@ def _handler(
 
         def _authorized(self) -> bool:
             host = self.headers.get("Host", "").lower()
-            return host in allowed_hosts and self.path.startswith(f"/{token}/")
+            if host not in allowed_hosts:
+                return False
+            # parse_request builds self.path with str(raw_requestline, "iso-8859-1"),
+            # so every code point is <= U+00FF and this encode cannot raise today; the
+            # guard is kept because its failure mode is closed (deny), not open.
+            try:
+                candidate = self.path[: len(capability_prefix)].encode("iso-8859-1")
+            except UnicodeEncodeError:
+                return False
+            return secrets.compare_digest(candidate, capability_prefix)
 
         def _bytes(self, body: bytes, content_type: str) -> None:
             self._headers(HTTPStatus.OK, content_type, len(body))
@@ -175,14 +274,13 @@ def _handler(
             self.send_header("Content-Length", str(length))
             self.send_header("Accept-Ranges", "bytes")
             if item.content_type.startswith("text/html"):
-                policy = (
+                self.response_policy = (
                     "default-src 'none'; base-uri 'none'; form-action 'none'; "
                     "frame-ancestors 'none'; style-src 'unsafe-inline'; "
                     "script-src 'unsafe-inline'"
                 )
             else:
-                policy = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'"
-            self._security_headers(policy)
+                self.response_policy = _STRICT_POLICY
             if status == HTTPStatus.PARTIAL_CONTENT:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
             self.end_headers()

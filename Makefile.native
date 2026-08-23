@@ -1,0 +1,221 @@
+NATIVE_MAKEFILE := $(lastword $(MAKEFILE_LIST))
+
+# The native surface: kilix-playalong-native.
+#
+# Kept apart from the root Makefile because the two share a directory and
+# nothing else.  That one drives uv and the Python pipeline; this one drives a
+# C11 command that only ever reads what the pipeline wrote.  Apart, a machine
+# with no uv can still build the player, and neither build can break the other.
+#
+# Every source list is written out.  A recursive wildcard would sweep up each
+# submodule's own tests, benchmarks and internal headers, which are theirs to
+# build and not ours; the one wildcard here is over tests/native, where finding
+# every suite is the point.
+
+NATIVE_COMMAND := kilix-playalong-native
+BUILD_DIR ?= build
+NATIVE_DIR := $(BUILD_DIR)/native
+VENDOR_DIR := $(BUILD_DIR)/vendor
+PREFIX ?= /usr/local
+DESTDIR ?=
+
+CC ?= cc
+INSTALL ?= install
+PKG_CONFIG ?= pkg-config
+
+# Both feature-test macros, always.  _POSIX_C_SOURCE alone leaves S_ISVTX
+# undeclared in kilix_state.c, and the build then fails inside a vendored file
+# for a reason that has nothing to do with that file.  kilix-state's own
+# Makefile sets both; so does this one, everywhere.
+CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE
+
+WARNINGS := \
+	-Wall -Wextra -Wpedantic -Wconversion -Wshadow \
+	-Wstrict-prototypes -Wmissing-prototypes -Wformat=2
+CFLAGS ?= -O2 -g
+# EXTRA_CFLAGS is how native-sanitize reaches in from its sub-make without
+# clobbering a CFLAGS the caller set.
+override CFLAGS += -std=c11 $(WARNINGS) $(EXTRA_CFLAGS)
+override LDFLAGS += $(EXTRA_LDFLAGS)
+DEPFLAGS := -MMD -MP
+
+SR := third_party/soft-raster
+KST := third_party/kilix-state
+KTS := third_party/kitty-terminal-session
+KFB := $(KTS)/third_party/kitty-framebuffer
+KIN := $(KTS)/third_party/kitty-input
+KKB := $(KIN)/third_party/kitty_keyboard
+
+# Probed, not assumed.  Empty here is not an error yet: native-deps turns it
+# into a sentence naming the Debian package, which is more use than a compiler
+# failing on a header nobody asked about.
+SDL2_CFLAGS := $(shell $(PKG_CONFIG) --cflags sdl2 2>/dev/null)
+SDL2_LIBS := $(shell $(PKG_CONFIG) --libs sdl2 2>/dev/null)
+SNDFILE_CFLAGS := $(shell $(PKG_CONFIG) --cflags sndfile 2>/dev/null)
+SNDFILE_LIBS := $(shell $(PKG_CONFIG) --libs sndfile 2>/dev/null)
+
+NATIVE_CPPFLAGS := -Iinclude -I$(SR)/include -I$(KST)/include \
+	-I$(KTS)/include -I$(KFB)/include -I$(KIN)/include -I$(KKB)/include \
+	$(SDL2_CFLAGS) $(SNDFILE_CFLAGS)
+NATIVE_LDLIBS := $(SDL2_LIBS) $(SNDFILE_LIBS) -lm -lpthread -lz
+
+NATIVE_SOURCES := \
+	src/native/kpa_json.c \
+	src/native/kpa_cells.c \
+	src/native/kpa_project.c \
+	src/native/kpa_audio.c \
+	src/native/kpa_ui.c
+NATIVE_OBJECTS := $(patsubst src/native/%.c,$(NATIVE_DIR)/%.o,$(NATIVE_SOURCES))
+MAIN_OBJECT := $(NATIVE_DIR)/main.o
+NATIVE_BINARY := $(NATIVE_DIR)/$(NATIVE_COMMAND)
+
+VENDOR_SOURCES := \
+	$(SR)/src/soft_raster.c \
+	$(KST)/src/kilix_state.c \
+	$(KST)/src/kilix_state_codec.c \
+	$(KTS)/src/kitty_terminal_session.c \
+	$(KFB)/src/kitty_framebuffer.c \
+	$(KIN)/src/kitty_input.c \
+	$(KIN)/src/kitty_input_posix.c \
+	$(KKB)/src/kitty_keyboard.c \
+	$(KKB)/src/kitty_keyboard_posix.c
+VENDOR_OBJECTS := \
+	$(patsubst %.c,$(VENDOR_DIR)/%.o,$(notdir $(VENDOR_SOURCES)))
+# Pinned upstream code, built with the conversion warnings off so their output
+# cannot bury ours.  Every other warning in WARNINGS still applies to them.
+VENDOR_CFLAGS := $(CFLAGS) -Wno-conversion -Wno-sign-conversion
+
+# One header per submodule: present only once the submodule is checked out.
+SUBMODULE_HEADERS := \
+	$(SR)/include/soft_raster.h \
+	$(KST)/include/kilix_state.h \
+	$(KTS)/include/kitty_terminal_session.h \
+	$(KFB)/include/kitty_framebuffer.h \
+	$(KIN)/include/kitty_input.h \
+	$(KKB)/include/kitty_keyboard.h
+
+# Every suite is its own binary, discovered rather than listed, so adding a
+# tests/native/test_*.c is all it takes to have it run.
+NATIVE_TEST_SOURCES := $(sort $(wildcard tests/native/test_*.c))
+NATIVE_TEST_OBJECTS := \
+	$(patsubst tests/native/%.c,$(NATIVE_DIR)/tests/%.o,$(NATIVE_TEST_SOURCES))
+NATIVE_TEST_BINARIES := \
+	$(patsubst tests/native/test_%.c,$(NATIVE_DIR)/test-%,$(NATIVE_TEST_SOURCES))
+
+DEPFILES := $(NATIVE_OBJECTS:.o=.d) $(MAIN_OBJECT:.o=.d) \
+	$(VENDOR_OBJECTS:.o=.d) $(NATIVE_TEST_OBJECTS:.o=.d)
+
+.PHONY: native native-test native-sanitize native-clean native-install \
+	native-deps
+
+# Reached through a chain of pattern rules, the test objects would count as
+# intermediate and be deleted after every run, recompiling every suite the
+# next time.  They are outputs, not scratch.
+.SECONDARY: $(NATIVE_TEST_OBJECTS)
+
+# Set for standalone use (`make -f Makefile.native`).  Guarded so that a root
+# Makefile which includes this file keeps the default goal it already chose.
+ifeq ($(.DEFAULT_GOAL),)
+.DEFAULT_GOAL := native
+endif
+
+native: $(NATIVE_BINARY)
+
+$(NATIVE_DIR) $(NATIVE_DIR)/tests $(VENDOR_DIR):
+	mkdir -p $@
+
+# native-deps is an order-only prerequisite everywhere: it runs before the
+# first compile and, being phony, never forces a rebuild of what it guards.
+$(NATIVE_DIR)/%.o: src/native/%.c | $(NATIVE_DIR) native-deps
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+$(NATIVE_DIR)/tests/%.o: tests/native/%.c | $(NATIVE_DIR)/tests native-deps
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
+
+vpath %.c $(sort $(dir $(VENDOR_SOURCES)))
+
+$(VENDOR_DIR)/%.o: %.c | $(VENDOR_DIR) native-deps
+	$(CC) $(CPPFLAGS) $(NATIVE_CPPFLAGS) $(VENDOR_CFLAGS) $(DEPFLAGS) \
+	    -c $< -o $@
+
+$(NATIVE_BINARY): $(MAIN_OBJECT) $(NATIVE_OBJECTS) $(VENDOR_OBJECTS) \
+	| $(NATIVE_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(NATIVE_LDLIBS) -o $@
+
+# A suite links the whole surface minus main.o: one that needs only the JSON
+# reader pays a few unused objects, and no suite has to be listed twice.
+$(NATIVE_DIR)/test-%: $(NATIVE_DIR)/tests/test_%.o $(NATIVE_OBJECTS) \
+	$(VENDOR_OBJECTS) | $(NATIVE_DIR)
+	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(NATIVE_LDLIBS) -o $@
+
+# The command is a prerequisite too: a test run that never links main.c would
+# not notice the entry point breaking.
+native-test: $(NATIVE_TEST_BINARIES) $(NATIVE_BINARY)
+	@test -n "$(strip $(NATIVE_TEST_BINARIES))" || { \
+	    printf 'native-test: no tests/native/test_*.c found\n' >&2; exit 1; }
+	@failed=0; total=0; \
+	for binary in $(NATIVE_TEST_BINARIES); do \
+	    total=$$((total + 1)); \
+	    printf '\n== %s ==\n' "$$binary"; \
+	    if "$$binary"; then \
+	        printf 'PASS %s\n' "$$binary"; \
+	    else \
+	        printf 'FAIL %s\n' "$$binary"; \
+	        failed=$$((failed + 1)); \
+	    fi; \
+	done; \
+	printf '\n'; \
+	if [ $$failed -ne 0 ]; then \
+	    printf 'native-test: %d of %d suites failed\n' "$$failed" "$$total" >&2; \
+	    exit 1; \
+	fi; \
+	printf 'native-test: %d of %d suites passed\n' "$$total" "$$total"
+
+# Sanitized objects get their own tree rather than sharing this one.  Sharing
+# means the next plain `native` silently links whatever the sanitizer left
+# behind, and a command that carries ASan into an install is worse than one
+# that has to be built twice.
+native-sanitize:
+	@ASAN_OPTIONS=detect_leaks=1 \
+	UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+	$(MAKE) -f $(NATIVE_MAKEFILE) --no-print-directory \
+	    BUILD_DIR='$(BUILD_DIR)/sanitize' \
+	    EXTRA_CFLAGS='-fsanitize=address,undefined -fno-omit-frame-pointer' \
+	    EXTRA_LDFLAGS='-fsanitize=address,undefined' \
+	    native-test
+
+# Only what this Makefile writes.  $(BUILD_DIR) itself belongs to whoever else
+# builds in this tree.
+native-clean:
+	rm -rf $(NATIVE_DIR) $(VENDOR_DIR) $(BUILD_DIR)/sanitize
+
+native-install: native
+	$(INSTALL) -d $(DESTDIR)$(PREFIX)/bin
+	$(INSTALL) -m 755 $(NATIVE_BINARY) $(DESTDIR)$(PREFIX)/bin/
+
+# Names the missing thing and the package that carries it, before a compiler
+# says something about a header nobody asked about instead.
+native-deps:
+	@say() { printf 'Makefile.native: %s\n' "$$1" >&2; }; \
+	missing=''; \
+	for header in $(SUBMODULE_HEADERS); do \
+	    test -f "$$header" || missing=1; \
+	done; \
+	if [ -n "$$missing" ]; then \
+	    say 'vendored submodules are not checked out'; \
+	    say 'run: git submodule update --init --recursive'; \
+	    exit 1; \
+	fi; \
+	command -v $(PKG_CONFIG) >/dev/null 2>&1 || { \
+	    say 'pkg-config is missing (Debian: pkg-config)'; exit 1; }; \
+	short=0; \
+	for probe in 'sdl2 libsdl2-dev' 'sndfile libsndfile1-dev' \
+	             'zlib zlib1g-dev'; do \
+	    set -- $$probe; \
+	    $(PKG_CONFIG) --exists "$$1" || { \
+	        say "$$1 development files are missing (Debian: $$2)"; \
+	        short=1; }; \
+	done; \
+	test $$short -eq 0
+
+-include $(DEPFILES)

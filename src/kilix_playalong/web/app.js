@@ -44,35 +44,17 @@ const elements = {
   lyricsViewport: document.querySelector('#lyrics-viewport'),
   lyricsList: document.querySelector('#lyrics-list'),
   lyricsEmpty: document.querySelector('#lyrics-empty'),
+  lyricsHiddenNote: document.querySelector('#lyrics-hidden-note'),
   tabStatus: document.querySelector('#tab-status'),
   tabViewport: document.querySelector('#tab-viewport'),
   tabGrid: document.querySelector('#tab-grid'),
+  tabGutter: document.querySelector('#tab-gutter'),
   tabEmpty: document.querySelector('#tab-empty'),
   tuning: document.querySelector('#tuning-label'),
   fret: document.querySelector('#fret-label'),
   tabPosition: document.querySelector('#tab-position'),
   ascii: document.querySelector('#ascii-download'),
   midi: document.querySelector('#midi-download'),
-};
-
-const state = {
-  project: null,
-  tracks: [],
-  audio: [],
-  lyrics: [],
-  tab: null,
-  tabEvents: [],
-  duration: 0,
-  position: 0,
-  rate: 1,
-  playing: false,
-  masterIndex: 0,
-  vocalsEnabled: true,
-  lyricsVisible: true,
-  activeCue: -1,
-  activeTabEvent: -1,
-  frame: 0,
-  preferenceKey: '',
 };
 
 const DEFAULT_TUNING = [
@@ -83,6 +65,67 @@ const DEFAULT_TUNING = [
   { midi: 59, label: 'B' },
   { midi: 64, label: 'E' },
 ];
+
+const HAVE_METADATA = 1;
+const HAVE_FUTURE_DATA = 3;
+
+// Drift the corrector is allowed to leave standing while the transport runs.
+const DRIFT_TOLERANCE = 0.12;
+// How far off state.position a stem may be and still keep its buffer on resume. Two
+// stems can sit on opposite sides of the position, so the spread a resume may leave is
+// twice this: 5 ms keeps that at 10 ms, an order of magnitude below DRIFT_TOLERANCE and
+// under the ~20 ms at which two attacks are heard as a flam. The relation is the
+// invariant — a resume must never preserve drift the corrector merely tolerated.
+const RESUME_ALIGNMENT = 0.005;
+// How long a stem may sit below HAVE_FUTURE_DATA while the transport runs before it
+// counts as a real shortfall rather than a seek settling. A seek into fully buffered
+// data settles in ~10 ms; 500 ms is two orders above that, and short enough that the
+// transport never claims to be playing through a silence a listener would notice.
+const STARVATION_GRACE_MS = 500;
+
+const NOTICE_TRACK = 'track';
+const NOTICE_TRANSPORT = 'transport';
+const NOTICE_LAYER = 'layer';
+// One bar, three standing slots, highest priority first. A transient transport message
+// covers a standing track or layer message and uncovers it again when it clears, so a
+// permanently dead stem is never silently forgotten after a stall recovers.
+// NOTICE_TRANSPORT is the only transient slot, and so the only one whose raisers need a
+// clearer on every path that ends the wait: NOTICE_TRACK is derived from track.error by
+// refreshTrackNotice and NOTICE_LAYER from a layer that would not load, and both stay
+// true until resetNotices runs on the next project load. The transport slot is raised by
+// commitBufferingPause and by playAll's failure branch, and cleared by
+// resumeWhenStemsReady, by playAll on success, and by pauseAll.
+const NOTICE_ORDER = [NOTICE_TRANSPORT, NOTICE_TRACK, NOTICE_LAYER];
+
+const state = {
+  project: null,
+  tracks: [],
+  audio: [],
+  lyrics: [],
+  lyricsResolved: false,
+  tab: null,
+  tabEvents: [],
+  tabStringCount: DEFAULT_TUNING.length,
+  duration: 0,
+  position: 0,
+  rate: 1,
+  playing: false,
+  playToken: 0,
+  resumeAfterBuffering: false,
+  masterIndex: 0,
+  vocalsEnabled: true,
+  lyricsVisible: true,
+  activeCue: -1,
+  activeTabEvent: -1,
+  frame: 0,
+  noticeKind: '',
+  notices: {},
+  preferenceKey: '',
+  preferencesTouched: false,
+  printUrl: '',
+  printReady: false,
+  exportToken: 0,
+};
 
 function text(value, fallback = '') {
   return typeof value === 'string' && value.trim() ? value : fallback;
@@ -151,15 +194,44 @@ function setConnection(label, tone = 'neutral') {
   elements.connection.append(dot, document.createTextNode(label));
 }
 
-function showNotice(message, tone = 'info') {
-  if (!message) {
+function renderNotice() {
+  // The bar always shows the highest-priority slot that is still true, so clearing a
+  // transient message restores the standing one instead of blanking over it.
+  const kind = NOTICE_ORDER.find((name) => state.notices[name]) || '';
+  state.noticeKind = kind;
+  const entry = kind ? state.notices[kind] : null;
+  if (!entry) {
     elements.notice.hidden = true;
     elements.notice.replaceChildren();
     return;
   }
-  elements.notice.className = `notice-bar notice-${tone}`;
-  elements.notice.textContent = message;
+  elements.notice.className = `notice-bar notice-${entry.tone}`;
+  elements.notice.textContent = entry.message;
   elements.notice.hidden = false;
+}
+
+function showNotice(message, tone, kind) {
+  // kind is required and has to be one of NOTICE_ORDER: renderNotice reads those three
+  // slots and nothing else, so a message filed under any other name would be stored and
+  // never shown. test_every_notice_is_filed_in_a_slot_the_bar_renders pins every call
+  // site rather than a default doing it silently.
+  if (!message) {
+    clearNotice(kind);
+    return;
+  }
+  state.notices[kind] = { message, tone };
+  renderNotice();
+}
+
+function clearNotice(kind) {
+  if (!state.notices[kind]) return;
+  delete state.notices[kind];
+  renderNotice();
+}
+
+function resetNotices() {
+  state.notices = {};
+  renderNotice();
 }
 
 function preferenceDefaults() {
@@ -192,10 +264,15 @@ function loadPreferences(projectId) {
 }
 
 function savePreferences() {
-  if (!state.preferenceKey) return;
+  if (!state.preferenceKey || !state.preferencesTouched) return;
   const tracks = {};
   state.tracks.forEach((track) => {
-    tracks[track.id] = { muted: track.muted, volume: track.volume };
+    // Only a deliberate deviation is stored, so a changed server default still wins.
+    // volume has no server-side default to deviate from today; the day the manifest
+    // grows one, it has to move under the same rule or it will freeze the same way.
+    tracks[track.id] = track.muted === Boolean(track.defaultMuted)
+      ? { volume: track.volume }
+      : { muted: track.muted, volume: track.volume };
   });
   try {
     window.localStorage.setItem(state.preferenceKey, JSON.stringify({
@@ -207,6 +284,11 @@ function savePreferences() {
   } catch (_error) {
     // Storage is a convenience; playback remains usable when it is blocked.
   }
+}
+
+function rememberPreferences() {
+  state.preferencesTouched = true;
+  savePreferences();
 }
 
 function isVocalTrack(track) {
@@ -243,7 +325,18 @@ function updateLayerControls() {
   setButtonState(elements.vocals, vocalsOn, 'Guide vocals', 'Guide vocals off');
   setButtonState(elements.lyricsToggle, state.lyricsVisible, 'Lyrics on screen', 'Lyrics hidden');
   elements.lyricsCard.classList.toggle('layer-hidden', !state.lyricsVisible);
-  savePreferences();
+  updateLyricsPlaceholders();
+}
+
+function updateLyricsPlaceholders() {
+  // Both placeholders are attribute-gated, like every other conditional block in the
+  // document, so at most one of them can ever be in the accessibility tree even if the
+  // stylesheet never loads. The CSS rules only style what these attributes allow.
+  elements.lyricsHiddenNote.hidden = state.lyricsVisible;
+  // 'No timed lyrics' is a verdict, not a loading state: it waits for the fetch.
+  elements.lyricsEmpty.hidden = !(
+    state.lyricsVisible && state.lyricsResolved && !state.lyrics.length
+  );
 }
 
 function updateAudioVolume(track) {
@@ -251,11 +344,20 @@ function updateAudioVolume(track) {
   if (record) record.element.volume = track.muted ? 0 : track.volume;
 }
 
+function applyMuteButton(track) {
+  const button = track.muteButton;
+  if (!button) return;
+  button.setAttribute('aria-pressed', String(track.muted));
+  button.setAttribute('aria-label', `${track.muted ? 'Unmute' : 'Mute'} ${track.label}`);
+  button.textContent = track.muted ? 'MUTED' : 'LIVE';
+}
+
 function updateTrackMute(track, muted) {
   track.muted = muted;
   updateAudioVolume(track);
-  renderTrackControls();
+  applyMuteButton(track);
   updateLayerControls();
+  rememberPreferences();
 }
 
 function makeTrackControl(track) {
@@ -278,11 +380,10 @@ function makeTrackControl(track) {
   const mute = document.createElement('button');
   mute.className = 'mute-button';
   mute.type = 'button';
-  mute.setAttribute('aria-label', `${track.muted ? 'Unmute' : 'Mute'} ${track.label}`);
-  mute.setAttribute('aria-pressed', String(track.muted));
-  mute.textContent = track.muted ? 'MUTED' : 'LIVE';
   mute.disabled = Boolean(track.error);
   mute.addEventListener('click', () => updateTrackMute(track, !track.muted));
+  track.muteButton = mute;
+  applyMuteButton(track);
 
   const volumeLabel = document.createElement('label');
   volumeLabel.className = 'volume-wrap';
@@ -297,12 +398,21 @@ function makeTrackControl(track) {
   volume.addEventListener('input', () => {
     track.volume = clamp(number(volume.value, 1), 0, 1);
     updateAudioVolume(track);
-    savePreferences();
+    rememberPreferences();
   });
+  track.volumeInput = volume;
   volumeLabel.append(volume);
   row.append(mute, volumeLabel);
   item.append(top, row);
   return item;
+}
+
+function applyTrackAvailability(track) {
+  // Updated in place rather than by re-rendering #track-list: a stem failing while the
+  // user is on a mute button would otherwise take the focus with it, which is the same
+  // defect F27 closed for mute clicks.
+  if (track.muteButton) track.muteButton.disabled = Boolean(track.error);
+  if (track.volumeInput) track.volumeInput.disabled = Boolean(track.error);
 }
 
 function renderTrackControls() {
@@ -324,6 +434,10 @@ function createAudioTracks() {
     const url = endpoint(track.url);
     if (!url) {
       track.error = 'Audio URL is unavailable.';
+      // The same treatment a stem that fails later gets: its mute button and volume
+      // slider would otherwise stay live over a stem the bar already names as
+      // unloadable. The track controls are built before this runs, so both exist.
+      applyTrackAvailability(track);
       return;
     }
     const audio = document.createElement('audio');
@@ -334,25 +448,38 @@ function createAudioTracks() {
     audio.playbackRate = state.rate;
     audio.preservesPitch = true;
     audio.volume = track.muted ? 0 : track.volume;
-    const record = { id: track.id, element: audio, failed: false };
+    const record = {
+      id: track.id,
+      label: track.label,
+      element: audio,
+      failed: false,
+      waiting: false,
+      starvedSince: 0,
+    };
     audio.addEventListener('loadedmetadata', () => {
-      if (state.masterIndex === state.audio.findIndex((record) => record.id === track.id)) {
-        if (Number.isFinite(audio.duration) && audio.duration > 0) {
-          state.duration = Math.max(state.duration, audio.duration);
-          updateDurationDisplay();
-        }
+      // A stem longer than the manifest duration widens the timeline and the tab lane
+      // for every stem. That is deliberate: a stem the transport cannot reach is worse
+      // than a lane with tail padding.
+      if (Number.isFinite(audio.duration) && audio.duration > state.duration) {
+        state.duration = audio.duration;
+        updateDurationDisplay();
       }
     });
     audio.addEventListener('error', () => {
       record.failed = true;
+      record.starvedSince = 0;
+      record.waiting = false;
       track.error = 'Audio could not be loaded.';
-      showNotice(`${track.label} could not be loaded. Other tracks remain available.`, 'warning');
-      renderTrackControls();
+      refreshTrackNotice();
+      applyTrackAvailability(track);
       chooseMaster();
       if (!playableAudio().length) pauseAll();
+      else resumeWhenStemsReady();
     });
-    audio.addEventListener('waiting', () => pauseForBuffering(track.label));
-    audio.addEventListener('stalled', () => pauseForBuffering(track.label));
+    audio.addEventListener('waiting', () => pauseForBuffering(record));
+    audio.addEventListener('stalled', () => pauseForBuffering(record));
+    audio.addEventListener('canplay', () => resumeAfterBuffering(record));
+    audio.addEventListener('playing', () => resumeAfterBuffering(record));
     audio.addEventListener('ended', () => {
       if (state.audio[state.masterIndex] && state.audio[state.masterIndex].element === audio) {
         pauseAll();
@@ -364,10 +491,30 @@ function createAudioTracks() {
     state.audio.push(record);
   });
   chooseMaster();
+  // Covers the stems rejected above for an unusable URL, which raise no 'error' event.
+  refreshTrackNotice();
 }
 
 function playableAudio() {
   return state.audio.filter((record) => !record.failed);
+}
+
+function refreshTrackNotice() {
+  // Derived from every failed stem rather than from the one that failed last, so a
+  // second failure cannot erase the first, and the bar cannot claim other tracks
+  // remain available when none do.
+  const labels = state.tracks.filter((track) => track.error).map((track) => track.label);
+  if (!labels.length) {
+    clearNotice(NOTICE_TRACK);
+    return;
+  }
+  const names = labels.length === 1
+    ? labels[0]
+    : `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+  const remainder = playableAudio().length
+    ? 'Other tracks remain available.'
+    : 'No audio remains for this project.';
+  showNotice(`${names} could not be loaded. ${remainder}`, 'warning', NOTICE_TRACK);
 }
 
 function chooseMaster() {
@@ -375,13 +522,79 @@ function chooseMaster() {
   state.masterIndex = next >= 0 ? next : 0;
 }
 
-function pauseForBuffering(label) {
+function pauseForBuffering(record) {
+  const audio = record.element;
+  if (audio.readyState >= HAVE_FUTURE_DATA) return;
+  // 'waiting' is only trustworthy when no seek is in flight: every seek drops readyState
+  // to HAVE_METADATA and raises 'waiting' even when it lands in fully buffered data.
+  // Seeks are judged by checkStemStarvation instead, on how long the shortfall lasts —
+  // measured, a seek into a hole can raise no event at all, so no listener may be the
+  // only detector. Outside a seek the audio has already stopped: pause at once.
+  if (audio.seeking) return;
+  commitBufferingPause(record);
+}
+
+function checkStemStarvation(now) {
+  // Polled every frame while the transport runs, because the media element is not
+  // obliged to tell us: a stem starved by a seek into an unbuffered region can sit at
+  // HAVE_METADATA indefinitely without a single 'waiting' or 'stalled' event.
+  // The poll rides requestAnimationFrame, which a background tab throttles or suspends
+  // while its audio keeps playing. While hidden, the 'waiting' and 'stalled' listeners
+  // remain the detector for every underrun that raises an event, and a starvation that
+  // raises none is caught within a grace window of the tab coming back on screen.
+  playableAudio().forEach((record) => {
+    if (record.element.readyState >= HAVE_FUTURE_DATA) {
+      record.starvedSince = 0;
+      return;
+    }
+    if (!record.starvedSince) {
+      record.starvedSince = now;
+      return;
+    }
+    if (now - record.starvedSince >= STARVATION_GRACE_MS) commitBufferingPause(record);
+  });
+}
+
+function commitBufferingPause(record) {
+  // This wait has no timeout. A stem that never recovers keeps the whole group paused for
+  // the rest of the session: nothing re-fetches it, the player view carries no retry
+  // control, and pressing Play does not escape it — either the play promise rejects and
+  // the bar asks for every stem to be ready, or the starvation poll commits this pause
+  // again about STARVATION_GRACE_MS later, because the stem is still below
+  // HAVE_FUTURE_DATA. Resuming without it would run the group silent where that stem
+  // should sound, so the pause is deliberate, but the absence of any way out short of a
+  // reload is a known limitation and not a handled case. A stem that fails outright is the
+  // other story: it raises 'error', and the bar moves to the track slot — through
+  // resumeWhenStemsReady while other stems are still playable, through pauseAll when none
+  // are.
+  record.starvedSince = 0;
+  record.waiting = true;
   if (!state.playing) return;
   state.playing = false;
-  state.audio.forEach((record) => record.element.pause());
+  state.resumeAfterBuffering = true;
+  state.audio.forEach((item) => item.element.pause());
   setConnection('Paused for buffering', 'warning');
-  showNotice(`${label} is buffering. Playback paused to keep every stem aligned.`, 'warning');
+  showNotice(
+    `${record.label} is buffering. Playback paused to keep every stem aligned.`,
+    'warning',
+    NOTICE_TRANSPORT,
+  );
   updatePlaybackUi();
+}
+
+function resumeAfterBuffering(record) {
+  if (record.element.readyState < HAVE_FUTURE_DATA) return;
+  record.starvedSince = 0;
+  record.waiting = false;
+  resumeWhenStemsReady();
+}
+
+function resumeWhenStemsReady() {
+  if (!state.resumeAfterBuffering) return;
+  if (playableAudio().some((item) => item.waiting)) return;
+  state.resumeAfterBuffering = false;
+  clearNotice(NOTICE_TRANSPORT);
+  if (!state.playing) void playAll();
 }
 
 function updateDurationDisplay() {
@@ -423,7 +636,15 @@ function updateAllPlaybackRates() {
 
 function pauseAll() {
   state.playing = false;
+  state.resumeAfterBuffering = false;
   state.audio.forEach((record) => record.element.pause());
+  // A transport message may outlive the moment it was raised only while the app is still
+  // waiting for the condition it describes, and this is where it stops waiting — the line
+  // above is the app giving up on the resume. Clearing the slot here uncovers whatever
+  // track or layer message is standing: without it, the last playable stem dying during a
+  // buffering pause (the 'error' handler routes to pauseAll) would leave "…is buffering"
+  // on screen for the rest of the session over a stem that will never sound again.
+  clearNotice(NOTICE_TRANSPORT);
   setConnection('Paused locally', 'good');
   updatePlaybackUi();
   savePreferences();
@@ -435,25 +656,43 @@ async function playAll() {
   if (state.duration && state.position >= state.duration - 0.05) setPosition(0);
   updateAllPlaybackRates();
   records.forEach((record) => {
+    // Re-seeking a stem that is already in place would drop its buffer, but every stem
+    // the corrector was allowed to leave adrift must be pulled back here: RESUME_ALIGNMENT
+    // is an order of magnitude tighter than DRIFT_TOLERANCE precisely so that a resume
+    // cannot restart two stems an audible distance apart.
+    if (Math.abs(record.element.currentTime - state.position) <= RESUME_ALIGNMENT) return;
     try { record.element.currentTime = state.position; } catch (_error) { /* wait for metadata */ }
   });
+  // The elements un-pause synchronously, so the transport must say so before the
+  // play promises settle; a stall or an explicit pause reconciles the state below.
+  state.playToken += 1;
+  const token = state.playToken;
+  state.playing = true;
+  setConnection('Playing locally', 'good');
+  updatePlaybackUi();
   const results = await Promise.all(records.map((record) => record.element.play().then(
     () => true,
     () => false,
   )));
+  if (token !== state.playToken || !state.playing) return;
   if (!results.every(Boolean)) {
     state.playing = false;
     records.forEach((record) => record.element.pause());
     setConnection('Audio not ready', 'warning');
+    // The one transport message that is not tied to an event: nothing is being waited on
+    // here, so it stands until the next Play press replaces or clears it, or until
+    // pauseAll clears it. It can therefore sit over a track failure that arrives after
+    // it — bounded, because it stays true meanwhile (playback did not start) and it asks
+    // for the one action that ends it.
     showNotice(
       'Every available stem must be ready before playback starts. Wait a moment and try again.',
       'warning',
+      NOTICE_TRANSPORT,
     );
     updatePlaybackUi();
     return;
   }
-  state.playing = true;
-  setConnection('Playing locally', 'good');
+  clearNotice(NOTICE_TRANSPORT);
   updatePlaybackUi();
 }
 
@@ -467,27 +706,27 @@ function seekBy(delta) {
 }
 
 function correctAudioDrift(masterTime) {
-  const master = state.audio[state.masterIndex];
   state.audio.forEach((record, index) => {
     if (record.failed) return;
     const audio = record.element;
     if (!Number.isFinite(audio.currentTime)) return;
+    // A starved stem sitting at HAVE_METADATA is the one that most needs re-seeking to
+    // master time, so only a stem with no timeline at all is skipped. A seek already in
+    // flight is left alone instead of being restarted every frame, which would keep it
+    // from ever completing.
+    if (audio.readyState < HAVE_METADATA || audio.seeking) return;
     if (index === state.masterIndex) {
       audio.playbackRate = state.rate;
       return;
     }
     const drift = audio.currentTime - masterTime;
-    if (Math.abs(drift) > 0.12) {
+    if (Math.abs(drift) > DRIFT_TOLERANCE) {
       try { audio.currentTime = masterTime; } catch (_error) { /* retry on the next frame */ }
       audio.playbackRate = state.rate;
     } else {
       audio.playbackRate = clamp(state.rate - drift * 0.18, state.rate * 0.985, state.rate * 1.015);
     }
   });
-  if (!master || !Number.isFinite(master.element.currentTime)) return;
-  if (Math.abs(master.element.currentTime - masterTime) > 0.25) {
-    try { master.element.currentTime = masterTime; } catch (_error) { /* no-op */ }
-  }
 }
 
 function updateMasterTimeline() {
@@ -502,6 +741,7 @@ function updateMasterTimeline() {
     : state.position;
   state.position = clamp(masterTime, 0, state.duration || Number.MAX_SAFE_INTEGER);
   correctAudioDrift(state.position);
+  checkStemStarvation(window.performance.now());
   updatePlaybackUi();
 }
 
@@ -528,12 +768,12 @@ function cueWords(cue) {
 
 function renderLyrics() {
   elements.lyricsList.replaceChildren();
+  state.lyricsResolved = true;
+  updateLyricsPlaceholders();
   if (!state.lyrics.length) {
-    elements.lyricsEmpty.hidden = false;
     elements.lyricsStatus.textContent = 'No timing available';
     return;
   }
-  elements.lyricsEmpty.hidden = true;
   elements.lyricsStatus.textContent = `${state.lyrics.length} timed cues`;
   state.lyrics.forEach((cue, index) => {
     const item = document.createElement('li');
@@ -567,6 +807,15 @@ function lyricIndexAt(time) {
   return found;
 }
 
+function centreCue(item) {
+  // Only the lyrics viewport may move: scrollIntoView would walk every scrollable
+  // ancestor and drag the rest of the workspace out of view.
+  const viewport = elements.lyricsViewport;
+  const limit = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+  const centred = item.offsetTop - (viewport.clientHeight - item.offsetHeight) / 2;
+  viewport.scrollTo({ top: clamp(centred, 0, limit), behavior: reducedMotion ? 'auto' : 'smooth' });
+}
+
 function updateLyrics(time) {
   if (!state.lyrics.length) return;
   const active = lyricIndexAt(time);
@@ -581,9 +830,7 @@ function updateLyrics(time) {
     const next = elements.lyricsList.querySelector(`[data-index="${active}"]`);
     if (next) {
       next.classList.add('is-active');
-      if (state.playing) {
-        next.scrollIntoView({ block: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
-      }
+      if (state.playing) centreCue(next);
     }
     state.activeCue = active;
   }
@@ -609,10 +856,17 @@ function normalizeTab(tab) {
   };
 }
 
+function stringNumber(sourceString) {
+  // The tab API indexes strings low to high; players count the high e as string 1.
+  return state.tabStringCount - sourceString;
+}
+
 function renderTab() {
   elements.tabGrid.replaceChildren();
+  elements.tabGutter.replaceChildren();
   state.activeTabEvent = -1;
   if (!state.tab || !state.tab.events.length) {
+    state.tabStringCount = DEFAULT_TUNING.length;
     elements.tabEmpty.hidden = false;
     elements.tabStatus.textContent = 'No tab available';
     elements.tuning.textContent = 'Tuning unavailable';
@@ -622,7 +876,8 @@ function renderTab() {
   elements.tabEmpty.hidden = true;
   state.tabEvents = state.tab.events;
   const labels = state.tab.tuning.labels;
-  const rowCount = Math.max(6, labels.length, state.tab.tuning.midi.length);
+  const rowCount = Math.max(DEFAULT_TUNING.length, labels.length, state.tab.tuning.midi.length);
+  state.tabStringCount = rowCount;
   const world = document.createElement('div');
   world.className = 'tab-world';
   const lastEvent = state.tab.events[state.tab.events.length - 1];
@@ -634,15 +889,12 @@ function renderTab() {
     const row = document.createElement('div');
     row.className = 'tab-row';
     row.dataset.string = String(sourceString);
-    const line = document.createElement('span');
-    line.className = 'tab-string-line';
-    const label = document.createElement('span');
-    label.className = 'tab-string-label';
-    label.textContent = text(labels[sourceString], `S${sourceString + 1}`);
-    line.append(label);
-    row.append(line);
     world.append(row);
     lineRows[sourceString] = row;
+    const label = document.createElement('span');
+    label.className = 'tab-string-label';
+    label.textContent = text(labels[sourceString], `S${stringNumber(sourceString)}`);
+    elements.tabGutter.append(label);
   }
   state.tabEvents.forEach((event, index) => {
     const positions = Array.isArray(event.positions) ? event.positions : [];
@@ -657,7 +909,7 @@ function renderTab() {
       const duration = Math.max(0.14, number(event.end, number(event.start) + 0.18) - number(event.start));
       note.style.width = `${Math.max(24, duration * 72)}px`;
       note.textContent = String(Math.max(0, Math.floor(number(position.fret, 0))));
-      note.title = `String ${stringIndex + 1}, fret ${note.textContent}`;
+      note.title = `String ${stringNumber(stringIndex)}, fret ${note.textContent}`;
       row.append(note);
     });
   });
@@ -701,7 +953,9 @@ function updateTab(time) {
   if (active >= 0) {
     const event = state.tabEvents[active];
     const positions = Array.isArray(event.positions) ? event.positions : [];
-    const frets = positions.map((position) => `S${number(position.string) + 1}:${number(position.fret)}`).join(' · ');
+    const frets = positions.map(
+      (position) => `S${stringNumber(number(position.string))}:${number(position.fret)}`,
+    ).join(' · ');
     elements.tabPosition.textContent = frets || `Event at ${formatTime(event.start)}`;
   } else {
     elements.tabPosition.textContent = state.playing ? 'Listen for the next note' : 'Ready to play';
@@ -710,14 +964,52 @@ function updateTab(time) {
 
 function configureDownload(anchor, value, label) {
   const safeUrl = endpoint(value);
+  // Every export stays hidden until a HEAD probe proves the file is really there: the
+  // manifest advertises print, ASCII tab and MIDI unconditionally, so an export the
+  // pipeline never wrote would otherwise hand the user a 404.
+  anchor.hidden = true;
   if (!safeUrl) {
-    anchor.hidden = true;
     anchor.removeAttribute('href');
-    return;
+    return safeUrl;
   }
   anchor.href = safeUrl;
-  anchor.hidden = false;
   anchor.setAttribute('aria-label', `Download ${label}`);
+  return safeUrl;
+}
+
+function setPrintAvailability(ready) {
+  state.printReady = ready;
+  elements.print.hidden = !ready;
+  // state.printUrl is non-empty whenever ready is true, so the anchor always has an href.
+  elements.printable.hidden = !ready;
+  // The print stylesheet may hide the on-screen lane only when a complete export exists
+  // to replace it; without one the page prints the part of the lane it has, as before.
+  app.classList.toggle('print-export-ready', ready);
+}
+
+async function exportExists(url) {
+  // endpoint() only proves a URL is same-origin and in scope; it cannot prove the
+  // resource exists. Nothing but the server can answer that.
+  if (!url) return false;
+  try {
+    const response = await fetch(url, { method: 'HEAD', credentials: 'same-origin' });
+    return response.ok;
+  } catch (_error) {
+    return false;
+  }
+}
+
+async function confirmExports(asciiUrl, midiUrl, token) {
+  const [printReady, asciiReady, midiReady] = await Promise.all([
+    exportExists(state.printUrl),
+    exportExists(asciiUrl),
+    exportExists(midiUrl),
+  ]);
+  // A retry or a second project must not have its controls rewritten by a stale probe.
+  if (token !== state.exportToken) return;
+  setPrintAvailability(printReady);
+  elements.ascii.hidden = !asciiReady;
+  elements.midi.hidden = !midiReady;
 }
 
 function configureProject(data) {
@@ -726,8 +1018,11 @@ function configureProject(data) {
   }
   const project = data.project;
   const projectId = text(project.id, 'private-project');
+  // A retry must not inherit the previous attempt's standing notices.
+  resetNotices();
   state.project = project;
   state.lyrics = [];
+  state.lyricsResolved = false;
   state.tab = null;
   state.tabEvents = [];
   state.activeCue = -1;
@@ -743,6 +1038,8 @@ function configureProject(data) {
       volume: 1,
       url: track.url,
       error: '',
+      muteButton: null,
+      volumeInput: null,
     }))
     : [];
   const preferences = loadPreferences(projectId);
@@ -753,10 +1050,12 @@ function configureProject(data) {
   updateDurationDisplay();
   renderTrackControls();
   createAudioTracks();
-  configureDownload(elements.printable, data.printUrl, 'printable mode');
-  configureDownload(elements.ascii, data.asciiTabUrl, 'ASCII tab');
-  configureDownload(elements.midi, data.midiUrl, 'MIDI');
-  elements.print.hidden = !data.printUrl;
+  state.printUrl = configureDownload(elements.printable, data.printUrl, 'printable mode') || '';
+  const asciiUrl = configureDownload(elements.ascii, data.asciiTabUrl, 'ASCII tab') || '';
+  const midiUrl = configureDownload(elements.midi, data.midiUrl, 'MIDI') || '';
+  setPrintAvailability(false);
+  state.exportToken += 1;
+  void confirmExports(asciiUrl, midiUrl, state.exportToken);
   updateLayerControls();
 }
 
@@ -765,14 +1064,16 @@ function toggleVocals() {
   state.tracks.filter(isVocalTrack).forEach((track) => {
     track.muted = !next;
     updateAudioVolume(track);
+    applyMuteButton(track);
   });
-  renderTrackControls();
   updateLayerControls();
+  rememberPreferences();
 }
 
 function toggleLyrics() {
   state.lyricsVisible = !state.lyricsVisible;
   updateLayerControls();
+  rememberPreferences();
 }
 
 async function loadOptionalDocuments(data) {
@@ -793,7 +1094,11 @@ async function loadOptionalDocuments(data) {
   renderTab();
   const failures = [lyricsResult, tabResult].filter((result) => result.status === 'rejected');
   if (failures.length) {
-    showNotice('Some practice layers are unavailable. Audio playback is still ready.', 'warning');
+    showNotice(
+      'Some practice layers are unavailable. Audio playback is still ready.',
+      'warning',
+      NOTICE_LAYER,
+    );
   }
 }
 
@@ -833,7 +1138,10 @@ function handleShortcut(event) {
     target.matches('button, a, input, select, textarea, [contenteditable="true"]') ||
     target.isContentEditable
   )) return;
-  if (event.code === 'Space') {
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  // Shift is not blanket-ignored: '+' is Shift+'=' on a US layout. Only Space needs it,
+  // so that Shift+Space keeps scrolling the page up.
+  if (event.code === 'Space' && !event.shiftKey) {
     event.preventDefault();
     togglePlayback();
   } else if (event.key === 'ArrowLeft') {
@@ -865,11 +1173,18 @@ elements.timeline.addEventListener('input', () => setPosition(number(elements.ti
 elements.rate.addEventListener('change', () => {
   state.rate = clamp(number(elements.rate.value, 1), 0.5, 1.5);
   updateAllPlaybackRates();
-  savePreferences();
+  rememberPreferences();
 });
 elements.vocals.addEventListener('click', toggleVocals);
 elements.lyricsToggle.addEventListener('click', toggleLyrics);
-elements.print.addEventListener('click', () => window.print());
+elements.print.addEventListener('click', () => {
+  // The rolling lane is one non-wrapping row, so only the printable export can
+  // carry the whole song onto paper — and only once a probe has confirmed it exists.
+  // That probe runs once per project load: an export written afterwards stays hidden until
+  // the project is loaded again, and one deleted afterwards is still opened here.
+  if (!state.printReady || !state.printUrl) return;
+  window.open(state.printUrl, '_blank', 'noopener');
+});
 elements.retry.addEventListener('click', () => void loadProject());
 window.addEventListener('keydown', handleShortcut);
 window.addEventListener('beforeunload', () => {

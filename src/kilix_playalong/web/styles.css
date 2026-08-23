@@ -271,7 +271,6 @@ kbd { display: inline-block; min-width: 1.35rem; padding: 0.12rem 0.25rem; borde
 .stage-card { overflow: hidden; }
 .lyrics-viewport { position: relative; height: 355px; overflow: auto; padding: 12px 22px 24px; scrollbar-color: var(--line-strong) transparent; }
 .lyrics-list { display: grid; gap: 0.35rem; max-width: 780px; margin: 0 auto; padding: 7rem 0; list-style: none; }
-.lyric-item { scroll-margin-block: 8rem; }
 .lyric-cue { display: block; width: 100%; padding: 0.65rem 0.7rem; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--faint); cursor: pointer; font-size: clamp(1rem, 2.2vw, 1.35rem); font-weight: 650; line-height: 1.28; text-align: left; transition: background 160ms ease, color 160ms ease, transform 160ms ease; }
 .lyric-cue:hover { color: var(--muted); }
 .lyric-cue:focus-visible { position: relative; z-index: 1; }
@@ -281,25 +280,29 @@ kbd { display: inline-block; min-width: 1.35rem; padding: 0.12rem 0.25rem; borde
 .lyric-word.is-current { color: var(--mint); text-shadow: 0 0 20px rgba(145, 237, 189, 0.4); }
 .layer-hidden .lyrics-viewport { min-height: 118px; height: auto; }
 .layer-hidden .lyrics-list { display: none; }
-.layer-hidden .content-empty { display: flex; }
+.lyrics-card.layer-hidden .content-empty { display: none; }
+.lyrics-card.layer-hidden .layer-note { display: flex; }
 
-.content-empty { display: flex; min-height: 130px; align-items: center; justify-content: center; flex-direction: column; gap: 0.4rem; padding: 1.5rem; color: var(--faint); text-align: center; }
-.content-empty strong { color: var(--muted); font-size: 0.82rem; }
-.content-empty span { max-width: 360px; font-size: 0.72rem; }
+.content-empty, .layer-note { display: flex; min-height: 130px; align-items: center; justify-content: center; flex-direction: column; gap: 0.4rem; padding: 1.5rem; color: var(--faint); text-align: center; }
+.content-empty strong, .layer-note strong { color: var(--muted); font-size: 0.82rem; }
+.content-empty span, .layer-note span { max-width: 360px; font-size: 0.72rem; }
+.layer-note { display: none; }
 
 .tab-viewport { position: relative; height: 292px; overflow: hidden; border-top: 1px solid var(--line); background: linear-gradient(180deg, rgba(0, 0, 0, 0.14), rgba(145, 237, 189, 0.025)); }
 .tab-grid { position: absolute; inset: 0; overflow: hidden; }
-.tab-world { position: absolute; top: 20px; left: 0; min-width: 100%; height: 238px; transition: transform 80ms linear; }
+.tab-world { position: absolute; top: 20px; left: 0; min-width: 100%; height: 238px; }
 .tab-row { position: relative; height: 39px; border-bottom: 1px solid rgba(213, 235, 220, 0.2); }
 .tab-row:first-child { border-top: 1px solid rgba(213, 235, 220, 0.2); }
-.tab-string-line { position: absolute; inset: 0; display: block; }
-.tab-string-label { position: absolute; z-index: 2; left: 0; display: grid; width: 42px; height: 100%; place-items: center; border-right: 1px solid var(--line-strong); background: rgba(18, 26, 22, 0.94); color: var(--mint); font-size: 0.68rem; font-weight: 850; }
+.tab-gutter { position: absolute; z-index: 4; top: 20px; left: 0; width: 42px; }
+.tab-string-label { display: grid; height: 39px; place-items: center; border-right: 1px solid var(--line-strong); background: rgba(18, 26, 22, 0.94); color: var(--mint); font-size: 0.68rem; font-weight: 850; }
 .tab-note { position: absolute; top: 7px; display: grid; min-width: 24px; height: 25px; padding: 0 5px; place-items: center; border: 1px solid rgba(145, 237, 189, 0.25); border-radius: 5px; background: rgba(38, 100, 72, 0.74); color: #daf9e7; font-size: 0.68rem; font-weight: 850; transition: background 100ms ease, border-color 100ms ease, box-shadow 100ms ease; }
 .tab-note.is-active { z-index: 3; border-color: var(--yellow); background: rgba(243, 213, 139, 0.9); color: #211d0e; box-shadow: 0 0 0 4px rgba(243, 213, 139, 0.1), 0 0 20px rgba(243, 213, 139, 0.28); }
 .tab-playhead { position: absolute; z-index: 5; top: 12px; bottom: 12px; left: 50%; width: 2px; background: var(--yellow); box-shadow: 0 0 18px rgba(243, 213, 139, 0.45); }
 .tab-playhead::before { position: absolute; top: -3px; left: 50%; width: 8px; height: 8px; border-radius: 50%; background: var(--yellow); content: ""; transform: translateX(-50%); }
 .tab-footer { justify-content: space-between; gap: 0.7rem; padding: 11px 22px 13px; color: var(--faint); font-size: 0.67rem; }
 .tab-position { overflow: hidden; max-width: 45%; color: var(--yellow); text-overflow: ellipsis; white-space: nowrap; }
+
+.print-note { display: none; }
 
 .download-card { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 18px 22px; }
 .download-card h2 { margin-bottom: 0.3rem; }
@@ -362,13 +365,19 @@ kbd { display: inline-block; min-width: 1.35rem; padding: 0.12rem 0.25rem; borde
   .lyrics-list { padding: 0; }
   .lyric-cue { padding: 0.28rem 0; color: #111; }
   .lyric-item.is-active .lyric-cue { border: 0; background: none; color: #111; transform: none; }
-  .tab-viewport { height: auto; overflow: visible; border: 1px solid #777; }
-  .tab-grid { position: relative; overflow: visible; }
-  .tab-world { position: relative; top: 0; left: 0; width: 100%; height: auto; transform: none !important; }
-  .tab-row { break-inside: avoid; }
-  .tab-note { background: #e1e9e2; color: #111; }
+  /* The lane may only be replaced by a real export. #app carries .print-export-ready once
+     a HEAD probe confirms one, and every rule that departs from the honest layout — the
+     hidden lane, the export note, the suppressed partial note — requires that class to be
+     present. Printing the lane under the note that explains it is the default, so a page
+     that never got the class, or lost the element that carries it, still prints that
+     honest pair instead of a blank space where the tab should be. */
+  .print-note { margin: 0; padding: 0.35rem 0 0; color: #333; font-size: 0.78rem; }
+  .print-note-partial { display: block; }
+  .print-export-ready .tab-viewport { display: none !important; }
+  .print-export-ready .print-note-partial { display: none; }
+  .print-export-ready .print-note-export { display: block; }
   .tab-footer { padding-inline: 0; color: #222; }
   .layer-hidden .lyrics-viewport { display: block; min-height: 0; height: auto; }
   .layer-hidden .lyrics-list { display: grid; }
-  .content-empty { display: none !important; }
+  .content-empty, .layer-note { display: none !important; }
 }

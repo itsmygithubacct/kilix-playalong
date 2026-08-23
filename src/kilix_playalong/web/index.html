@@ -22,7 +22,8 @@
           <span class="status-dot" aria-hidden="true"></span>
           Loading project
         </span>
-        <button class="button button-quiet" id="print-button" type="button" hidden>Print</button>
+        <button class="button button-quiet" id="print-button" type="button"
+          title="Open the complete printable tab and lyrics" hidden>Print</button>
         <a class="button button-quiet" id="printable-link" href="#" target="_blank" rel="noopener" hidden>
           Printable mode
         </a>
@@ -175,6 +176,10 @@
                   <strong>No timed lyrics loaded</strong>
                   <span>Supply lyrics or an alignment artifact to see the current line here.</span>
                 </div>
+                <div class="layer-note" id="lyrics-hidden-note" hidden>
+                  <strong>Lyrics are hidden</strong>
+                  <span>Turn the lyrics layer back on to follow the words while you play.</span>
+                </div>
               </div>
             </section>
 
@@ -189,11 +194,19 @@
               <div class="tab-viewport" id="tab-viewport" tabindex="0" aria-label="Rolling guitar tablature">
                 <div class="tab-playhead" aria-hidden="true"></div>
                 <div class="tab-grid" id="tab-grid"></div>
+                <div class="tab-gutter" id="tab-gutter" aria-hidden="true"></div>
                 <div class="content-empty" id="tab-empty" hidden>
                   <strong>No tab events loaded</strong>
                   <span>Imported or inferred tab will follow the playback cursor here.</span>
                 </div>
               </div>
+              <p class="print-note print-note-export">
+                The rolling tab lane is screen-only. Print opens the complete printable tab.
+              </p>
+              <p class="print-note print-note-partial">
+                No printable tab export exists for this project, so this page prints only the
+                part of the lane that is on screen.
+              </p>
               <div class="tab-footer">
                 <span id="tuning-label">Standard tuning</span>
                 <span id="fret-label">Max fret --</span>

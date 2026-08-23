@@ -66,10 +66,7 @@ def test_auto_model_uses_strongest_compatible_cached_model(
     monkeypatch.setattr(transcription, "_cuda_available", lambda: False)
     monkeypatch.setattr(transcription, "_available_memory_bytes", lambda: 16 * 1024**3)
     snapshot = (
-        tmp_path
-        / "models--Systran--faster-whisper-medium"
-        / "snapshots"
-        / "fixture-revision"
+        tmp_path / "models--Systran--faster-whisper-medium" / "snapshots" / "fixture-revision"
     )
     snapshot.mkdir(parents=True)
     (snapshot / "model.bin").write_bytes(b"fixture")
