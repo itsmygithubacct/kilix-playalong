@@ -1736,6 +1736,243 @@ static bool test_malformed(const kpa_fixture *fixture)
     return true;
 }
 
+/*
+ * Lyric provenance: the timing kind and the alignment's own report.
+ *
+ * The additive fields have to be readable without changing what a document
+ * that predates them means, so the first case here is the one every project
+ * on disk already has - no timing member at all - and it must come back as a
+ * claim nobody made rather than as a guess.
+ *
+ * The hostile cases are the ones a display would otherwise repeat to a
+ * player: a matched fraction outside 0..1, a negative mean displacement, a
+ * string where a number belongs, and an alignment report attached to spans
+ * that were never measured.  A confidence this reader cannot check is one it
+ * does not pass on - the document is refused where the report itself is
+ * broken, and the report is left unread where it describes a measurement that
+ * never ran.
+ */
+#define PROVENANCE_HEAD \
+    "{\"schema\":\"" KPA_LYRICS_SCHEMA "\",\"language\":\"en\"," \
+    "\"source\":\"imported-plain\",\"cues\":[{\"start\":1.0,\"end\":2.0," \
+    "\"text\":\"a b\",\"words\":[{\"start\":1.0,\"end\":1.5,\"text\":\"a\"}," \
+    "{\"start\":1.5,\"end\":2.0,\"text\":\"b\"}]}],"
+
+#define FULL_REPORT \
+    "\"alignment\":{\"matched_fraction\":0.94,\"interpolated_words\":3," \
+    "\"mean_displacement\":0.125,\"usable\":true}"
+
+/* Load a lyrics document that is expected to be accepted. */
+static bool accept_lyrics(const kpa_fixture *fixture, const char *id,
+                          const kpa_project *project, const char *document,
+                          kpa_lyrics *out)
+{
+    CHECK(write_artifact(fixture, id, "lyrics/lyrics.json", document));
+    CHECK_RESULT(kpa_lyrics_load(project, out), KPA_OK);
+    /* Every case below carries the same one cue: a document read for its
+     * provenance is still a document that has to have been read. */
+    CHECK(out->cue_count == 1u && out->word_count == 2u);
+    CHECK(out->cues[0].start == 1.0 && out->cues[0].word_count == 2u);
+    return true;
+}
+
+static bool test_lyrics_provenance(const kpa_fixture *fixture)
+{
+    const char *id = "song-provenance";
+    kpa_project project;
+    kpa_lyrics lyrics;
+
+    CHECK(install_sample(fixture, id, NULL));
+    CHECK_RESULT(kpa_project_open(&project, id), KPA_OK);
+
+    /*
+     * SAMPLE_LYRICS has no timing member, which is what every document
+     * written before the field looks like.  It loads exactly as it did:
+     * three cues, and no claim about where their times came from.
+     */
+    CHECK_RESULT(kpa_lyrics_load(&project, &lyrics), KPA_OK);
+    CHECK(lyrics.cue_count == 3u && lyrics.word_count == 3u);
+    CHECK(lyrics.timing == KPA_TIMING_UNKNOWN);
+    CHECK(!lyrics.alignment.present);
+    CHECK(lyrics.alignment.matched_fraction == 0.0);
+    CHECK(lyrics.alignment.interpolated_words == 0u);
+    CHECK(lyrics.alignment.mean_displacement == 0.0);
+    CHECK(!lyrics.alignment.usable);
+    kpa_lyrics_free(&lyrics);
+
+    /* One document of each kind. */
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"authored\"}", &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_AUTHORED);
+    CHECK(!lyrics.alignment.present);
+    kpa_lyrics_free(&lyrics);
+
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"estimated\"}",
+                        &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_ESTIMATED);
+    CHECK(!lyrics.alignment.present);
+    kpa_lyrics_free(&lyrics);
+
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        FULL_REPORT "}", &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_MEASURED);
+    CHECK(lyrics.alignment.present);
+    CHECK(lyrics.alignment.matched_fraction == 0.94);
+    CHECK(lyrics.alignment.interpolated_words == 3u);
+    CHECK(lyrics.alignment.mean_displacement == 0.125);
+    CHECK(lyrics.alignment.usable);
+    kpa_lyrics_free(&lyrics);
+
+    /* Measured is not required to carry a report, and null says the same
+     * thing as leaving it out: nothing was reported.  Neither may leave a
+     * zeroed report looking like a perfect one. */
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\"}", &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_MEASURED && !lyrics.alignment.present);
+    kpa_lyrics_free(&lyrics);
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":null}", &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_MEASURED && !lyrics.alignment.present);
+    kpa_lyrics_free(&lyrics);
+
+    /* The ends of the range are values, not refusals: nothing matched, and
+     * everything matched with nothing to fill in. */
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.0,"
+                        "\"interpolated_words\":2,\"mean_displacement\":0.0,"
+                        "\"usable\":false}}", &lyrics));
+    CHECK(lyrics.alignment.present && lyrics.alignment.matched_fraction == 0.0);
+    CHECK(lyrics.alignment.interpolated_words == 2u &&
+          !lyrics.alignment.usable);
+    kpa_lyrics_free(&lyrics);
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":1.0,"
+                        "\"interpolated_words\":0,\"mean_displacement\":0.0,"
+                        "\"usable\":true,\"grade\":\"good\"}}", &lyrics));
+    CHECK(lyrics.alignment.present && lyrics.alignment.matched_fraction == 1.0);
+    CHECK(lyrics.alignment.usable);
+    kpa_lyrics_free(&lyrics);
+
+    /*
+     * A report hung off spans that were spread rather than heard describes a
+     * measurement that never ran.  The document still loads - the cues are
+     * sound - but the numbers are left where they lie, because a matched
+     * fraction shown against a guess would be the whole defect this field
+     * exists to end.
+     */
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"estimated\","
+                        FULL_REPORT "}", &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_ESTIMATED);
+    CHECK(!lyrics.alignment.present);
+    CHECK(lyrics.alignment.matched_fraction == 0.0);
+    kpa_lyrics_free(&lyrics);
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"authored\","
+                        "\"alignment\":{\"matched_fraction\":\"nonsense\"}}",
+                        &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_AUTHORED && !lyrics.alignment.present);
+    kpa_lyrics_free(&lyrics);
+
+    /* A timing that is not a string, and one this build has never heard of:
+     * both are claims about the document that the reader cannot check. */
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":3}", KPA_CORRUPT));
+    /* null is not one of the three, and it is refused the way this
+     * document's other optional strings already refuse it. */
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":null}", KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"guessed\"}",
+                        KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"Measured\"}",
+                        KPA_CORRUPT));
+
+    /* Hostile reports, one damaged shape at a time. */
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":[]}", KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":5.0,"
+                        "\"interpolated_words\":0,\"mean_displacement\":0.0,"
+                        "\"usable\":true}}", KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":-0.5,"
+                        "\"interpolated_words\":0,\"mean_displacement\":0.0,"
+                        "\"usable\":true}}", KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":\"0.9\","
+                        "\"interpolated_words\":0,\"mean_displacement\":0.0,"
+                        "\"usable\":true}}", KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"interpolated_words\":0,"
+                        "\"mean_displacement\":0.0,\"usable\":true}}",
+                        KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.9,"
+                        "\"interpolated_words\":-1,\"mean_displacement\":0.0,"
+                        "\"usable\":true}}", KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.9,"
+                        "\"interpolated_words\":2.5,"
+                        "\"mean_displacement\":0.0,\"usable\":true}}",
+                        KPA_CORRUPT));
+    /* More interpolated words than this reader would ever hold: a report
+     * about some other document. */
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.9,"
+                        "\"interpolated_words\":65537,"
+                        "\"mean_displacement\":0.0,\"usable\":true}}",
+                        KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.9,"
+                        "\"interpolated_words\":0,"
+                        "\"mean_displacement\":-0.001,\"usable\":true}}",
+                        KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.9,"
+                        "\"interpolated_words\":0,"
+                        "\"mean_displacement\":1e400,\"usable\":true}}",
+                        KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.9,"
+                        "\"interpolated_words\":0,\"mean_displacement\":0.0,"
+                        "\"usable\":\"yes\"}}", KPA_CORRUPT));
+    CHECK(reject_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        "\"alignment\":{\"matched_fraction\":0.9,"
+                        "\"interpolated_words\":0,"
+                        "\"mean_displacement\":0.0}}", KPA_CORRUPT));
+
+    /* A refused document leaves nothing of itself behind, and the reader is
+     * still good for the next one. */
+    CHECK(accept_lyrics(fixture, id, &project,
+                        PROVENANCE_HEAD "\"timing\":\"measured\","
+                        FULL_REPORT "}", &lyrics));
+    CHECK(lyrics.timing == KPA_TIMING_MEASURED && lyrics.alignment.present);
+    kpa_lyrics_free(&lyrics);
+    CHECK(lyrics.timing == KPA_TIMING_UNKNOWN && !lyrics.alignment.present);
+
+    kpa_project_close(&project);
+    return true;
+}
+
 /* ------------------------------------------------------ differential mode */
 
 /*
@@ -1913,7 +2150,7 @@ static bool run_suite(const kpa_fixture *fixture)
            test_manifest_path_security(fixture) &&
            test_artifact_walk(fixture) && test_bounds(fixture) &&
            test_ordering(fixture) && test_malformed(fixture) &&
-           test_searches(fixture) &&
+           test_lyrics_provenance(fixture) && test_searches(fixture) &&
            test_listing(fixture);
 }
 

@@ -16,6 +16,11 @@
  * be muted; lyrics are a layer that can be hidden.  Hiding lyrics never mutes
  * vocals and muting vocals never hides lyrics; the same holds for the guitar
  * track and the tab layer.
+ *
+ * The practice view draws a fretboard as well as the rolling tab lane.  Both
+ * are pictures of the same six strings and they are ordered by one
+ * preference, low_string_on_top, so that two representations of one
+ * instrument on one screen can never disagree about which string is which.
  */
 
 #include <stdbool.h>
@@ -34,6 +39,29 @@ typedef enum kpa_view {
     KPA_VIEW_PRACTICE = 1,
     KPA_VIEW_HELP = 2
 } kpa_view;
+
+/*
+ * How much of the fretboard block is drawn.  The default is all of it: the
+ * point of this screen is a guitar being played, so it opens showing one.
+ */
+typedef enum kpa_fretboard_mode {
+    KPA_FB_NECK_AND_RAMP = 0,
+    KPA_FB_NECK = 1,
+    KPA_FB_OFF = 2
+} kpa_fretboard_mode;
+
+/* What is printed inside a sounding note: its fret, its note name, or both. */
+typedef enum kpa_note_label {
+    KPA_LABEL_FRET = 0,
+    KPA_LABEL_NOTE = 1,
+    KPA_LABEL_BOTH = 2
+} kpa_note_label;
+
+/* Whether the timeline carries the song's note density behind the playhead. */
+typedef enum kpa_overview {
+    KPA_OVERVIEW_PLAIN = 0,
+    KPA_OVERVIEW_DENSITY = 1
+} kpa_overview;
 
 typedef struct kpa_ui_track {
     char label[KPA_TEXT_CAPACITY];
@@ -87,6 +115,36 @@ typedef struct kpa_ui_model {
     /* True when the terminal has no graphics path and the surface is drawing
      * the cell-only fallback: transport, mixer and lyric/tab text, no pixels. */
     bool cell_only;
+
+    /*
+     * The fretboard and the practice aids around it.
+     *
+     * Every field's zero value is the intended default, which is what lets
+     * all three of this program's model paths - calloc in kpa_ui_run, memset
+     * in main.c's build_model, calloc in the test fixture - keep working
+     * unchanged: a zeroed model opens on the neck with the approach ramp,
+     * fret numbers, high e on top, a right-handed neck, no capo and a
+     * two-second look-ahead.
+     */
+    kpa_fretboard_mode fretboard;
+    kpa_note_label note_label;
+    kpa_overview overview;
+    bool low_string_on_top;   /* false is the tablature order, high e on top */
+    bool left_handed;         /* false puts the nut on the left */
+    float ramp_seconds;       /* 0.0f reads as the 2.0f default */
+    uint8_t capo;             /* 0 = none; frets below it cannot be played */
+    uint8_t lead_in;          /* 0 = off, else seconds rewound before playing */
+    uint8_t speed_ramp;       /* 0 = off, else the percent a loop starts at */
+    /*
+     * The chord label the callout shows, latched by the surface's own
+     * refresh so it does not flicker at the rate the notes change.  Empty
+     * means the caller kept no history and composition should name the
+     * chord it can see, which is the honest answer for a single still.
+     */
+    char chord[24];
+    /* Non-zero when that label is a chord symbol rather than the list of
+     * note names the surface falls back to, which is drawn dimmer. */
+    uint8_t chord_kind;
 } kpa_ui_model;
 
 typedef struct sr_canvas sr_canvas;

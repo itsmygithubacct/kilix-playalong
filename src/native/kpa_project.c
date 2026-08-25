@@ -1127,6 +1127,104 @@ static kpa_result fill_words(const kpa_json_document *document,
     return KPA_OK;
 }
 
+/*
+ * The alignment's own report.  Every member it declares is required once the
+ * object is there: a report missing its matched fraction is not a report, and
+ * this reader would rather refuse the document than hand a player a
+ * confidence it made up.  Members it does not declare are ignored, as
+ * everywhere else in this file.
+ */
+static kpa_result parse_alignment(const kpa_json_document *document,
+                                  const kpa_json_node *root,
+                                  kpa_lyrics_alignment *out)
+{
+    const kpa_json_node *report = kpa_json_member(document, root, "alignment");
+    uint64_t interpolated = 0u;
+    double fraction = 0.0;
+    double displacement = 0.0;
+    bool usable = false;
+
+    /* Absent and null are the same thing: no report was made. */
+    if (report == NULL || report->type == KPA_JSON_NULL) return KPA_OK;
+    if (report->type != KPA_JSON_OBJECT) return KPA_CORRUPT;
+    if (!number_of(document, report, "matched_fraction", &fraction))
+        return KPA_CORRUPT;
+    if (!(fraction >= 0.0) || !(fraction <= 1.0)) return KPA_CORRUPT;
+    /* No more interpolated words than this reader would hold in the first
+     * place; a count past that is describing some other document. */
+    if (!integer_of(document, report, "interpolated_words", KPA_MAX_WORDS,
+                    &interpolated))
+        return KPA_CORRUPT;
+    if (!number_of(document, report, "mean_displacement", &displacement))
+        return KPA_CORRUPT;
+    if (!(displacement >= 0.0)) return KPA_CORRUPT;
+    if (!kpa_json_bool(document, report, "usable", &usable)) return KPA_CORRUPT;
+    out->present = true;
+    out->matched_fraction = fraction;
+    out->interpolated_words = (uint32_t)interpolated;
+    out->mean_displacement = displacement;
+    out->usable = usable;
+    return KPA_OK;
+}
+
+/*
+ * How the cues came to be timed.  Absent is the ordinary case and leaves the
+ * document reading exactly as it did before the field existed; a timing this
+ * build has never heard of is refused the same way an unknown stage status
+ * is, because it is a claim about the document that this reader cannot check.
+ *
+ * The report is read only for a measured document.  An alignment object
+ * hanging off text that was spread across the duration describes a
+ * measurement that never ran, and rather than pass those numbers on this
+ * leaves them where every other member it has no use for is left.
+ */
+static kpa_result parse_provenance(const kpa_json_document *document,
+                                   const kpa_json_node *root,
+                                   kpa_lyrics *lyrics)
+{
+    const kpa_json_node *timing = kpa_json_member(document, root, "timing");
+
+    if (timing == NULL) {
+        /*
+         * Written before the field existed.  The Python loader reads the
+         * source id's "-estimated" tail for these and this reader does the
+         * same, because otherwise the only person the warning exists for --
+         * one whose project predates the upgrade, looking at a highlight that
+         * was spread across the duration rather than measured -- is the only
+         * person who never gets it.
+         *
+         * Only the warning is inferred, never the reassurance.  A document
+         * without the tail stays unknown and draws no caption, which is what
+         * the browser does with the same file: "the timing came with the
+         * source" is a positive claim, and the absence of an "-estimated"
+         * tail is not enough to make it.  The Python loader answers
+         * "authored" here because it needs a value to route on, and says in
+         * its own docstring that this under-reports; a surface has no such
+         * need and should say nothing rather than guess reassuringly.
+         */
+        const size_t length = strlen(lyrics->source);
+        const char *tail = "-estimated";
+        const size_t tail_length = strlen(tail);
+
+        if (length >= tail_length &&
+            memcmp(lyrics->source + length - tail_length, tail,
+                   tail_length) == 0) {
+            lyrics->timing = KPA_TIMING_ESTIMATED;
+        }
+        return KPA_OK;
+    }
+    if (timing->type != KPA_JSON_STRING) return KPA_CORRUPT;
+    if (kpa_json_string_equals(timing, "authored"))
+        lyrics->timing = KPA_TIMING_AUTHORED;
+    else if (kpa_json_string_equals(timing, "measured"))
+        lyrics->timing = KPA_TIMING_MEASURED;
+    else if (kpa_json_string_equals(timing, "estimated"))
+        lyrics->timing = KPA_TIMING_ESTIMATED;
+    else return KPA_CORRUPT;
+    if (lyrics->timing != KPA_TIMING_MEASURED) return KPA_OK;
+    return parse_alignment(document, root, &lyrics->alignment);
+}
+
 static kpa_result parse_lyrics(const kpa_json_document *document,
                                kpa_lyrics *lyrics, size_t size)
 {
@@ -1151,6 +1249,8 @@ static kpa_result parse_lyrics(const kpa_json_document *document,
     result = copy_text(document, root, "source", lyrics->source,
                        sizeof lyrics->source);
     if (result != KPA_OK && result != KPA_NOT_FOUND) return result;
+    result = parse_provenance(document, root, lyrics);
+    if (result != KPA_OK) return result;
     result = count_lyrics(document, cues, &word_count);
     if (result != KPA_OK) return result;
 

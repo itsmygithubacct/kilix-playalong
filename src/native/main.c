@@ -81,6 +81,8 @@ static void usage(FILE *stream)
         "       " PROGRAM " --list\n"
         "       " PROGRAM " --doctor [--json]\n"
         "       " PROGRAM " --render <project-id> --out <path.ppm>\n"
+        "       " PROGRAM " --render <project-id> --out <prefix>"
+        " --at <s> --duration <s> [--fps <n>]\n"
         "       " PROGRAM " --help | --version\n"
         "\n"
         "  (no argument)  the library: every project on this machine\n"
@@ -91,9 +93,16 @@ static void usage(FILE *stream)
         "  --doctor       what this build can do here, as text or as one\n"
         "                 JSON object.  It exits 0 whenever it produced a\n"
         "                 report, so read the fields for the verdict\n"
-        "  --render       draw the practice view once, headless, to a\n"
-        "                 binary PPM 1280x720, a quarter of the way in and\n"
-        "                 snapped onto a live cue when there are lyrics\n"
+        "  --render       draw the practice view headless, to a binary PPM\n"
+        "                 1280x720.  With no --at it lands a quarter of the\n"
+        "                 way in, snapped onto a live cue when there are\n"
+        "                 lyrics; --at picks the second instead, clamped to\n"
+        "                 the end of the song\n"
+        "  --duration     render a numbered sequence <prefix>-00000.ppm\n"
+        "                 onward instead of one frame, --fps apart (default\n"
+        "                 30, at most 120, at most 20000 frames).  This is\n"
+        "                 how to film the surface: grabbing the display\n"
+        "                 captures whatever is stacked over the window\n"
         "\n"
         "exit: 0 ok, 1 unexpected failure, 2 invalid input, 3 no such\n"
         "      project, 4 no audio device, 5 no usable terminal\n"
@@ -635,7 +644,58 @@ static void build_model(kpa_ui_model *model, const kpa_project *project,
     }
 }
 
-static int command_render(const char *project_id, const char *path)
+/*
+ * A rendered sequence: the same frame the practice view draws, at successive
+ * positions, straight to disk.  It exists because the alternative for showing
+ * this surface in motion is grabbing the X display, and that captures whatever
+ * happens to be stacked over the window rather than the window -- a 42-second
+ * clip came back holding somebody else's terminals.  Rendering is also exact,
+ * repeatable, and does not require the machine to be left alone while it runs.
+ *
+ * Bounds are deliberate rather than defensive: at 30 fps a ten-minute cap is
+ * 18000 frames and roughly 50 GB of PPM, so the frame count is what is capped,
+ * not the duration, and the cap is stated in the message when it is hit.
+ */
+#define RENDER_MAX_FRAMES 20000u
+#define RENDER_MAX_FPS 120u
+
+static int render_one(kpa_ui_model *model, const char *path)
+{
+    if (kpa_ui_render_ppm(model, RENDER_WIDTH, RENDER_HEIGHT, path) != 0) {
+        fail("cannot write the render");
+        return KPA_EXIT_FAILED;
+    }
+    return KPA_EXIT_OK;
+}
+
+static int render_sequence(kpa_ui_model *model, const char *prefix,
+                           double start, double duration, uint32_t fps)
+{
+    const uint64_t count = (uint64_t)((double)fps * duration + 0.5);
+    char path[KPA_PATH_CAPACITY];
+    uint64_t frame;
+
+    if (count == 0u || count > RENDER_MAX_FRAMES) {
+        fail("frame count must be between one and 20000");
+        return KPA_EXIT_USAGE;
+    }
+    for (frame = 0u; frame < count; frame++) {
+        const int written = snprintf(path, sizeof path, "%s-%05llu.ppm",
+                                     prefix, (unsigned long long)frame);
+
+        if (written < 0 || (size_t)written >= sizeof path) {
+            fail("the output prefix is too long");
+            return KPA_EXIT_USAGE;
+        }
+        model->position = start + (double)frame / (double)fps;
+        if (model->position > model->duration) model->position = model->duration;
+        if (render_one(model, path) != KPA_EXIT_OK) return KPA_EXIT_FAILED;
+    }
+    return KPA_EXIT_OK;
+}
+
+static int command_render(const char *project_id, const char *path,
+                          double at, double duration, uint32_t fps)
 {
     kpa_project *project;
     kpa_ui_model *model;
@@ -676,9 +736,16 @@ static int command_render(const char *project_id, const char *path)
     if (project->has_tab) (void)kpa_tab_load(project, &tab);
     build_model(model, project, lyrics.cue_count > 0u ? &lyrics : NULL,
                 tab.event_count > 0u ? &tab : NULL);
-    if (kpa_ui_render_ppm(model, RENDER_WIDTH, RENDER_HEIGHT, path) != 0) {
-        fail("cannot write the render");
-        status = KPA_EXIT_FAILED;
+    /* A negative --at is refused by the parser; past the end is clamped here,
+     * because "render the last frame" is a reasonable thing to ask for and
+     * refusing it would only make the caller compute the duration first. */
+    if (at >= 0.0) {
+        model->position = at > model->duration ? model->duration : at;
+    }
+    if (duration > 0.0) {
+        status = render_sequence(model, path, model->position, duration, fps);
+    } else {
+        status = render_one(model, path);
     }
     kpa_tab_free(&tab);
     kpa_lyrics_free(&lyrics);
@@ -741,10 +808,34 @@ static int command_run(const char *project_id)
     return KPA_EXIT_OK;
 }
 
+/*
+ * One non-negative, finite number, or false.  strtod alone is not enough: it
+ * accepts "nan", "inf" and a leading "+-", it reports nothing for trailing
+ * junk unless the end pointer is checked, and a bound compared against NaN is
+ * a bound that silently switches itself off.
+ */
+static bool render_number(const char *text, double limit, double *out)
+{
+    char *end = NULL;
+    double value;
+
+    if (text == NULL || *text == '\0') return false;
+    errno = 0;
+    value = strtod(text, &end);
+    if (end == text || end == NULL || *end != '\0') return false;
+    if (errno == ERANGE) return false;
+    if (!(value >= 0.0) || !(value <= limit)) return false;
+    *out = value;
+    return true;
+}
+
 static int command_render_argv(int argc, char **argv)
 {
     const char *project_id = NULL;
     const char *path = NULL;
+    double at = -1.0;
+    double duration = 0.0;
+    double fps = 30.0;
     int index = 2;
 
     if (argc > 2 && argv[2][0] != '-') {
@@ -754,6 +845,23 @@ static int command_render_argv(int argc, char **argv)
     for (; index < argc; index++) {
         if (strcmp(argv[index], "--out") == 0 && index + 1 < argc) {
             path = argv[++index];
+        } else if (strcmp(argv[index], "--at") == 0 && index + 1 < argc) {
+            if (!render_number(argv[++index], 24.0 * 60.0 * 60.0, &at)) {
+                fail("--at wants seconds from the start of the song");
+                return KPA_EXIT_USAGE;
+            }
+        } else if (strcmp(argv[index], "--duration") == 0 && index + 1 < argc) {
+            if (!render_number(argv[++index], 60.0 * 60.0, &duration) ||
+                duration <= 0.0) {
+                fail("--duration wants a positive number of seconds");
+                return KPA_EXIT_USAGE;
+            }
+        } else if (strcmp(argv[index], "--fps") == 0 && index + 1 < argc) {
+            if (!render_number(argv[++index], (double)RENDER_MAX_FPS, &fps) ||
+                fps < 1.0) {
+                fail("--fps wants a rate between one and 120");
+                return KPA_EXIT_USAGE;
+            }
         } else {
             usage(stderr);
             return KPA_EXIT_USAGE;
@@ -763,7 +871,7 @@ static int command_render_argv(int argc, char **argv)
         usage(stderr);
         return KPA_EXIT_USAGE;
     }
-    return command_render(project_id, path);
+    return command_render(project_id, path, at, duration, (uint32_t)fps);
 }
 
 int main(int argc, char **argv)

@@ -7,7 +7,7 @@ import shutil
 import sys
 from pathlib import Path
 
-from ..errors import ProviderFailedError, ProviderUnavailableError
+from ..errors import InvalidInputError, ProviderFailedError, ProviderUnavailableError
 from ..paths import cache_home, ensure_private_directory
 from ..runner import run_command
 from .media import probe
@@ -30,7 +30,7 @@ def separate(
     timeout: float = 90 * 60,
 ) -> dict[str, Path]:
     if model not in SUPPORTED_MODELS:
-        raise ProviderFailedError("unsupported Demucs model")
+        raise InvalidInputError("unsupported Demucs model")
     if not is_available():
         raise ProviderUnavailableError(
             "Demucs is not installed; run `uv sync --all-extras` from the repository"

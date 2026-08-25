@@ -11,7 +11,7 @@ from typing import cast
 from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 
 from ..errors import InvalidInputError, ProviderFailedError
-from ..runner import run_command, usable_seconds
+from ..runner import require_seconds, run_command
 
 ALLOWED_HOSTS = frozenset(
     {
@@ -135,17 +135,6 @@ def _parse_filesize(value: str) -> int:
 #   check that holds this one, not a runtime guard.
 
 
-def _validate_seconds(value: float, description: str) -> None:
-    """Restate ``run_command``'s own precondition as a PlayalongError, using its predicate.
-
-    ``timeout`` reaches ``run_command``, which rejects an unusable one with a bare
-    ``ValueError``. ``max_duration`` reaches nothing but a comparison, and a NaN would not
-    raise there at all -- it would compare False and switch the duration gate off silently.
-    """
-    if usable_seconds(value) is None:
-        raise InvalidInputError(f"{description} must be a positive, finite number of seconds")
-
-
 def _validate_language(language: str) -> None:
     """Gate the one caller-supplied value that lands in the argv, as ``--sub-langs``.
 
@@ -210,7 +199,7 @@ def _base_arguments() -> list[str]:
 def inspect(url: str, *, timeout: float = 60) -> dict[str, object]:
     """Read one video's metadata document. Entry point: see the error contract above."""
     validate_url(url)
-    _validate_seconds(timeout, "provider timeout")
+    require_seconds(timeout, "provider timeout")
     result = run_command(
         [*_base_arguments(), "--dump-single-json", "--skip-download", url],
         timeout=timeout,
@@ -315,9 +304,9 @@ def download(
     covers and what it does not.
     """
     filesize_limit = _parse_filesize(max_filesize)
-    _validate_seconds(timeout, "provider timeout")
+    require_seconds(timeout, "provider timeout")
     _validate_language(language)
-    _validate_seconds(max_duration, "maximum duration")
+    require_seconds(max_duration, "maximum duration")
     metadata = inspect(url)
     duration = metadata.get("duration")
     if not isinstance(duration, int | float) or duration <= 0:

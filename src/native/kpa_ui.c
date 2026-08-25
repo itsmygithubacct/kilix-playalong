@@ -1,7 +1,7 @@
 /*
  * The native Kilix surface for kilix-playalong.
  *
- * Five decisions shape this file.
+ * Six decisions shape this file.
  *
  * Composition is a pure function of the view model.  kpa_ui_compose reads
  * nothing but its arguments and this file's constant tables - no clock, no
@@ -23,10 +23,24 @@
  * the low E at 0, players count the high e as string 1, and the browser
  * surface shipped the identity mapping between the two before it was fixed.
  * The display needs two conversions and each exists exactly once:
- * invert_string_axis() for the row a string is drawn on, used by both the
- * names and the notes, and player_string_number() for the number a player is
- * told.  The string-name gutter is drawn at a constant x outside the lane's
- * clip, so it cannot translate with the notes the way the browser's did.
+ * string_display_row() for the row a string is drawn on, used by the neck,
+ * the ramp, the lane's names and notes and the cell-only tab alike, and
+ * player_string_number() for the number a player is told.  The string-name
+ * gutter is drawn at a constant x outside the lane's clip, so it cannot
+ * translate with the notes the way the browser's did.
+ *
+ * The fretboard is drawn to the physics rather than to a grid, and the
+ * physics is not this file's.  kpa_fret.h holds the geometry, the chord
+ * table, the hand position and the note state, and the browser player draws
+ * the same guitar from the same definitions; nothing here recomputes any of
+ * them.  Fret n sits at 1 - 2^(-n/12) of the scale length, so the frets
+ * crowd together as they climb - drawing them evenly spaced is the single
+ * thing that makes a fretboard look fake, and tests/native/test_ui.c asserts
+ * that every fret cell is narrower than the one before it.  Two functions,
+ * neck_wire_x() and neck_finger_x(), are the only things that turn a fret
+ * into an x on this screen, so the neck, the approach ramp, the position box
+ * and the fret ruler cannot drift apart, and one reflection in neck_mirror()
+ * is the whole of left-handed.
  *
  * Audio state and display state never touch.  kpa_ui_internal_apply_key is
  * the whole key table and is a pure function of the model; the event loop
@@ -43,6 +57,7 @@
 #include "kilix_playalong/kpa_ui.h"
 
 #include "kilix_playalong/kpa_cells.h"
+#include "kilix_playalong/kpa_fret.h"
 
 #include "kitty_terminal_session.h"
 #include "soft_raster.h"
@@ -50,6 +65,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
@@ -71,6 +87,14 @@
 #define KPA_UI_WARN 0x00FF9040u
 #define KPA_UI_ALERT 0x00FF6060u
 #define KPA_UI_LOOP 0x00B070FFu
+/*
+ * The hand box gets its own ink rather than borrowing the loop's.  Two
+ * different meanings sharing one colour on one screen is how a player comes
+ * to read "where your hand goes" as "the range you are looping", and the
+ * value is the browser's own #2eaa75 so that the two surfaces do not draw
+ * the same instrument in two different tempers.
+ */
+#define KPA_UI_HAND 0x002EAA75u
 
 /* ------------------------------------------------------------ geometry */
 
@@ -83,6 +107,50 @@
 #define KPA_UI_LANE_EVENTS 4096u  /* bound on one frame's lane walk */
 #define KPA_UI_LINE_CAPACITY 640u
 #define KPA_UI_MAX_LYRIC_ROWS 6
+
+/* -------------------------------------------------------- the fretboard */
+
+/* Board wood, dark and warm, so the instrument reads as an instrument
+ * against the cool backdrop.  Nut bone, fret nickel, inlay pearl. */
+#define KPA_FB_WOOD 0x00201814u
+#define KPA_FB_BONE 0x00E8E0D0u
+#define KPA_FB_NICKEL 0x00808890u
+#define KPA_FB_PEARL 0x00C8C0B0u
+#define KPA_FB_WOUND 0x00B0B4BCu
+#define KPA_FB_PLAIN 0x00D8DCE4u
+
+/*
+ * How long a note is drawn for at the least, in seconds, measured from its
+ * onset.  A string does not fall silent the instant a transcription's event
+ * ends, and the shortest event in the audited song is 0.094 s - about two
+ * frames at the event loop's 40 ms poll, which is not long enough to see.
+ * A note whose written life is shorter than this decays over the remainder
+ * instead of vanishing.
+ */
+#define KPA_FB_MIN_LIFE 0.22f
+#define KPA_FB_RAMP_DEFAULT 2.0f
+#define KPA_FB_RAMP_MAX 4.0f
+/*
+ * Notes one frame may hold.  The load was measured on the audited song: a
+ * 2.0 s look-ahead carries a median of 17 and a maximum of 32 sounding-plus-
+ * approaching notes, and the longest window offered here, 4.0 s, about 60.
+ * 96 is slack rather than a real limit, and kpa_fret_notes_at reports when
+ * it had to truncate, so an overrun is visible instead of silent.
+ */
+#define KPA_FB_MAX_NOTES 96u
+/* A chord label has to hold this long before it replaces the one on screen.
+ * Measured: 0.37 s between changes unlatched, 1.23 s with this rule.  The
+ * lag it costs is 0.25 s, which is one median-length event (0.348 s). */
+#define KPA_FB_CHORD_HOLD 0.25
+/* Fretboard block heights, in pixels.  All chosen. */
+#define KPA_FB_CALLOUT_H 18
+#define KPA_FB_RULER_H 14
+#define KPA_FB_BLOCK_MIN 96       /* below this no fretboard is drawn */
+#define KPA_FB_BLOCK_FULL 150     /* below this the ruler, then the ramp, go */
+#define KPA_FB_BLOCK_MAX 260
+#define KPA_FB_PITCH_MIN 13       /* six strings still readable: 78 px */
+#define KPA_FB_NUT_MARGIN 14.0f   /* room for the nut bar and the open marks */
+#define KPA_FB_RAIL 56            /* the left rail: chord box and string names */
 
 /* --------------------------------------------------------------- input */
 
@@ -116,6 +184,41 @@
  */
 int kpa_ui_internal_apply_key(kpa_ui_model *model, uint32_t key,
                               uint32_t modifiers);
+
+/*
+ * The caption the lyrics band carries about where its times came from,
+ * exported for tests/native/test_ui.c on the same terms as the key table
+ * above: it is a pure function of the lyrics, and asserting what a player is
+ * told through a terminal would be asserting the terminal.  Writes the line
+ * and the ink it is drawn in and returns true, or writes an empty line and
+ * returns false when the document made no claim.
+ */
+bool kpa_ui_internal_lyrics_caption(const kpa_lyrics *lyrics, char *out,
+                                    size_t size, uint32_t *rgb);
+
+/*
+ * The two pieces of the fretboard this surface owns, exported for
+ * tests/native/test_ui.c on the same terms as the pair above.  Neither is
+ * the fretboard model: kpa_fret.h holds the geometry, the chord table, the
+ * hand position and the note state, and both surfaces draw from it.  What is
+ * left here is what only a drawn neck has to decide.
+ *
+ * kpa_ui_internal_neck_x turns a fret into the two x coordinates this screen
+ * draws at - the wire, and the finger behind it - with handedness applied.
+ * Asserting the neck really is a neck (every fret cell narrower than the one
+ * before it) belongs on this rather than on a canvas read back pixel by
+ * pixel.
+ *
+ * kpa_ui_internal_chord_label is what the callout says.  The name comes from
+ * kpa_fret_chord_identify, which refuses far more than it accepts; the only
+ * thing added here is what to show when there is no name, which is a display
+ * decision and not a naming one.
+ */
+bool kpa_ui_internal_neck_x(uint32_t max_fret, float x, float width,
+                            bool left_handed, uint32_t fret,
+                            float *out_wire, float *out_finger);
+void kpa_ui_internal_chord_label(const int32_t *pitches, uint32_t count,
+                                 char *out, size_t size, bool *out_named);
 
 /* --------------------------------------------------------- small maths */
 
@@ -166,18 +269,509 @@ static uint32_t player_string_number(uint32_t api_index, uint32_t string_count)
 }
 
 /*
- * The lane's row order and the API's string order are inverses of each other,
- * and it is the same inversion read either way: display row 0 is the top of
- * the lane and holds the highest string, and the highest string is index
- * string_count - 1.  One function, used for the row a note lands on and for
- * the name printed beside it, because two copies of this arithmetic are two
- * things that can drift - which is how the browser ended up drawing its
- * labels in one order and its notes in another.
+ * The display row an API string index lands on, for every widget that draws
+ * strings: the neck, the approach ramp, the tab lane's names and notes, and
+ * the cell-only tab.  Two copies of this arithmetic are two things that can
+ * drift - which is how the browser ended up drawing its labels in one order
+ * and its notes in another - so there is one.
+ *
+ * Both orders are real.  Tablature puts the high e on top and that is what
+ * this surface has always drawn; a player looking down at their own
+ * instrument sees the low E nearest them, i.e. on top.  Rather than pick a
+ * side, low_on_top is a preference (the `o` key) and it moves the neck and
+ * the lane together, because two pictures of one instrument disagreeing
+ * about string order on one screen is worse than either convention.  The
+ * default is false - the tablature order, unchanged.
+ *
+ * The order itself is kpa_fret_row's, so the neck the browser draws and the
+ * neck this draws cannot disagree about it.  This wrapper exists for the
+ * unsigned types the surface counts rows in and for nothing else.
  */
-static uint32_t invert_string_axis(uint32_t index, uint32_t string_count)
+static uint32_t string_display_row(uint32_t api_index, uint32_t string_count,
+                                   bool low_on_top)
 {
-    if (string_count == 0u || index >= string_count) return 0u;
-    return string_count - 1u - index;
+    const int32_t row =
+        kpa_fret_row((int32_t)api_index, (int32_t)string_count,
+                     low_on_top ? KPA_FRET_LOW_E_TOP : KPA_FRET_HIGH_E_TOP);
+
+    if (row < 0) return 0u;
+    return (uint32_t)row;
+}
+
+/* ------------------------------------------------ the fretboard model */
+
+/*
+ * The geometry, the chord table, the hand position and the note state all
+ * live in kpa_fret.h and are shared with the browser player, because every
+ * number the two surfaces both compute is a place they can drift apart -
+ * and they already did once, over which end of the neck string 1 is.
+ * Nothing below recomputes any of it.  What is here is what only a drawn
+ * neck has to decide: where the box is, which way round it faces, how a
+ * struck string looks while it rings, and what to say when the shared
+ * namer declines to name a chord.
+ */
+
+/*
+ * A drawn neck.  `board` is the fret span in screen pixels with the nut at
+ * its left edge, always, and `wood` is the wider rectangle the board is
+ * painted on - wider because the nut needs a margin to sit in.  left_handed
+ * reflects every x about the WOOD's centre on the way out, so that margin
+ * moves to the other side with the nut; nut_x and far_x are the reflected
+ * ends, for the widgets that need to know which way the strings run.
+ */
+typedef struct kpa_fb_geom {
+    kpa_fret_rect board;      /* nut at board.x, always, before mirroring */
+    float wood_x0;            /* the drawn wood, in screen order */
+    float wood_x1;
+    float mirror_sum;         /* wood_x0 + wood_x1: the left-handed flip */
+    float nut_x;              /* fret 0, after mirroring */
+    float far_x;              /* the last drawn fret, after mirroring */
+    float string_pitch;
+    int y0;
+    int y1;
+    uint32_t strings;
+    uint32_t max_fret;
+    bool low_on_top;
+    bool left_handed;
+} kpa_fb_geom;
+
+/*
+ * A left-handed neck is the same neck seen from the other side, so it is one
+ * reflection on the way out rather than a second set of geometry.  The axis
+ * is the wood's centre and not the board's, so the margin the nut sits in
+ * moves with the nut.
+ */
+static float neck_mirror(const kpa_fb_geom *geometry, float x)
+{
+    if (!geometry->left_handed) return x;
+    return geometry->mirror_sum - x;
+}
+
+/* The wire itself: d(n) / d(N) across the board. */
+static float neck_wire_x(const kpa_fb_geom *geometry, uint32_t fret)
+{
+    double unit;
+
+    if (fret > geometry->max_fret) fret = geometry->max_fret;
+    unit = kpa_fret_display_position((int32_t)fret,
+                                     (int32_t)geometry->max_fret);
+    if (unit < 0.0) unit = 0.0;
+    return neck_mirror(geometry,
+                       (float)(geometry->board.x +
+                               unit * geometry->board.width));
+}
+
+/*
+ * Where the finger goes, which is not where the wire is: a player presses
+ * into the space behind the fret that names the note, so the mark sits at
+ * the centre of that space.  Fret 0 is an open string and is marked at the
+ * nut - there is no finger, and the nut is the thing stopping the string.
+ * kpa_fret_point_of makes both of those decisions; this only places them.
+ */
+static float neck_finger_x(const kpa_fb_geom *geometry, uint32_t fret)
+{
+    kpa_fret_point point;
+
+    if (fret > geometry->max_fret) fret = geometry->max_fret;
+    if (!kpa_fret_point_in_rect(0, (int32_t)fret, (int32_t)geometry->strings,
+                                (int32_t)geometry->max_fret,
+                                KPA_FRET_HIGH_E_TOP, &geometry->board,
+                                &point)) {
+        return geometry->nut_x;
+    }
+    return neck_mirror(geometry, (float)point.x);
+}
+
+static float neck_string_y(const kpa_fb_geom *geometry, uint32_t api_index)
+{
+    const uint32_t row = string_display_row(api_index, geometry->strings,
+                                            geometry->low_on_top);
+
+    return (float)geometry->y0 + ((float)row + 0.5f) * geometry->string_pitch;
+}
+
+bool kpa_ui_internal_neck_x(uint32_t max_fret, float x, float width,
+                            bool left_handed, uint32_t fret,
+                            float *out_wire, float *out_finger)
+{
+    kpa_fb_geom geometry;
+
+    if (max_fret < 1u || max_fret > (uint32_t)KPA_FRET_MAX_FRET) return false;
+    if (!(width > 0.0f) || fret > max_fret) return false;
+    (void)memset(&geometry, 0, sizeof geometry);
+    geometry.board.x = (double)x;
+    geometry.board.y = 0.0;
+    geometry.board.width = (double)width;
+    geometry.board.height = 1.0;
+    geometry.strings = KPA_STRING_COUNT;
+    geometry.max_fret = max_fret;
+    geometry.left_handed = left_handed;
+    geometry.wood_x0 = x;
+    geometry.wood_x1 = x + width;
+    geometry.mirror_sum = geometry.wood_x0 + geometry.wood_x1;
+    geometry.nut_x = neck_mirror(&geometry, x);
+    if (out_wire != NULL) *out_wire = neck_wire_x(&geometry, fret);
+    if (out_finger != NULL) *out_finger = neck_finger_x(&geometry, fret);
+    return true;
+}
+
+/*
+ * String ink, warm at the low E and cool at the high e.  Colour here is
+ * redundant: every string already has its own row on both the neck and the
+ * lane, so nothing at all is carried by hue alone and a reader who cannot
+ * separate these six loses nothing.  That is a description of this layout,
+ * not a claim that the palette was checked for contrast between the pairs.
+ */
+static const uint32_t kpa_string_rgb[KPA_STRING_COUNT] = {
+    0x00FF7A5Cu, 0x00FFB84Du, 0x00E8E24Du,
+    0x0060E88Au, 0x0050B0FFu, 0x00C08CFFu
+};
+
+/* Thickness, from the shared gauge ratios: the low E is 2.14 times the high
+ * e, which is the square root of the true gauge ratio and is what keeps all
+ * six visibly graded instead of making the high e sub-pixel. */
+static float fb_string_width(uint32_t api_index, float base)
+{
+    const double ratio = kpa_fret_string_width_ratio((int32_t)api_index);
+
+    if (ratio < 0.0) return base;
+    return base * (float)ratio;
+}
+
+static uint32_t fb_string_count(const kpa_tab *tab)
+{
+    if (tab != NULL && tab->string_count > 0u &&
+        tab->string_count <= KPA_STRING_COUNT) {
+        return tab->string_count;
+    }
+    return KPA_STRING_COUNT;
+}
+
+/*
+ * The board's last fret.  The audited transcription declares 20 and uses
+ * 0..19; the clamp keeps the neck inside the range the shared contract
+ * covers, which is 24 frets.
+ */
+static uint32_t fb_max_fret(const kpa_tab *tab)
+{
+    uint32_t max = 20u;
+
+    if (tab != NULL && tab->max_fret > 0u) max = tab->max_fret;
+    if (max < 5u) max = 5u;
+    if (max > (uint32_t)KPA_FRET_MAX_FRET) max = (uint32_t)KPA_FRET_MAX_FRET;
+    return max;
+}
+
+static float model_ramp_seconds(const kpa_ui_model *model)
+{
+    /* One accessor rather than a special case at every use, so a memset
+     * model behaves like one that asked for the default. */
+    if (!(model->ramp_seconds > 0.05f)) return KPA_FB_RAMP_DEFAULT;
+    if (model->ramp_seconds > KPA_FB_RAMP_MAX) return KPA_FB_RAMP_MAX;
+    return model->ramp_seconds;
+}
+
+static float fb_visual_life(const kpa_fret_note *note)
+{
+    const float life = (float)(note->end - note->start);
+
+    return life > KPA_FB_MIN_LIFE ? life : KPA_FB_MIN_LIFE;
+}
+
+/*
+ * Sounding and arriving, as the SCREEN means them rather than as the
+ * artifact does.  A note is drawn from its onset until its visual life is
+ * spent, which is at or after the end the transcription wrote; everything
+ * that has not started yet is arriving.  kpa_fret_note.state is relative to
+ * the instant the query was made, and fb_collect deliberately queries an
+ * earlier one, so these two are what classify a note here.
+ */
+static bool fb_note_sounding(const kpa_fret_note *note, double when)
+{
+    return note->start <= when &&
+           when < note->start + (double)fb_visual_life(note);
+}
+
+static bool fb_note_arriving(const kpa_fret_note *note, double when)
+{
+    return note->start > when;
+}
+
+/*
+ * One frame's notes: everything sounding now and everything arriving inside
+ * the look-ahead window, from one call into the shared model.
+ */
+typedef struct kpa_fb_frame {
+    kpa_fret_note notes[KPA_FB_MAX_NOTES];
+    kpa_fret_note_report report;
+    /* The instant being drawn, which is NOT the instant the notes were
+     * queried at: see fb_collect. */
+    double when;
+    /* The newest note on each string, or NULL.  See fb_ringing. */
+    const kpa_fret_note *ring[KPA_STRING_COUNT];
+    uint32_t ringing;
+} kpa_fb_frame;
+
+/*
+ * LATEST ONSET WINS, one note per string.
+ *
+ * This is not a tidying-up.  Sampled at 20 Hz over the audited song, 46% of
+ * instants have between two and four notes claiming a single string at
+ * once - a transcription's sustains overlap the next note on the same
+ * string - and the most any one string is asked to play at once is four.  A
+ * neck that drew all of them would show shapes no hand can play.  After
+ * this rule between none and six strings ring, and 5% of those instants have
+ * nothing sounding at all.
+ *
+ * It is a decision about what to draw, which is why it is here and not in
+ * kpa_fret.c: the query's job is to report what the artifact says.
+ */
+static void fb_ringing(kpa_fb_frame *frame, uint32_t strings)
+{
+    uint32_t index;
+
+    (void)memset(frame->ring, 0, sizeof frame->ring);
+    frame->ringing = 0u;
+    for (index = 0u; index < frame->report.count; ++index) {
+        const kpa_fret_note *note = &frame->notes[index];
+        const uint32_t string = (uint32_t)note->string_index;
+        const kpa_fret_note *held;
+
+        if (!fb_note_sounding(note, frame->when)) continue;
+        if (note->string_index < 0 || string >= strings) continue;
+        held = frame->ring[string];
+        if (held != NULL && held->start > note->start) continue;
+        frame->ring[string] = note;
+    }
+    for (index = 0u; index < strings; ++index) {
+        if (frame->ring[index] != NULL) ++frame->ringing;
+    }
+}
+
+/*
+ * One query, asked KPA_FB_MIN_LIFE earlier than the instant being drawn with
+ * the window widened by the same amount, so that the answer also carries the
+ * notes that have just ended - the ones this screen is still drawing the
+ * tail of.  Everything is classified against frame->when afterwards.
+ */
+static bool fb_collect(kpa_fb_frame *frame, const kpa_tab *tab, double when,
+                       float look_ahead, uint32_t strings)
+{
+    const double tail = (double)KPA_FB_MIN_LIFE;
+
+    (void)memset(&frame->report, 0, sizeof frame->report);
+    frame->when = when;
+    if (!kpa_fret_notes_at(tab, when - tail, (double)look_ahead + tail,
+                           frame->notes, KPA_FB_MAX_NOTES, &frame->report)) {
+        (void)memset(frame->ring, 0, sizeof frame->ring);
+        frame->ringing = 0u;
+        return false;
+    }
+    fb_ringing(frame, strings);
+    return true;
+}
+
+/*
+ * How present a note looks and how hard it was just struck, both from its
+ * age alone.  A 0.094 s note - the shortest in the audited song - is held
+ * open for 0.055 s, sustains to 0.132 s and decays to 0.22 s; the 6.052 s
+ * note attacks for 0.10 s and decays over its last 0.18 s.  Both read.
+ */
+typedef struct kpa_fb_envelope {
+    float level;
+    float flash;      /* 1 at the pluck, 0 once the note is just sounding */
+} kpa_fb_envelope;
+
+static kpa_fb_envelope fb_envelope(const kpa_fret_note *note, double when)
+{
+    kpa_fb_envelope out;
+    const float age = (float)(when - note->start);
+    const float life = fb_visual_life(note);
+    float attack;
+    float release;
+
+    out.level = 0.0f;
+    out.flash = 0.0f;
+    attack = life * 0.25f;
+    if (attack > 0.10f) attack = 0.10f;
+    release = life * 0.40f;
+    if (release > 0.18f) release = 0.18f;
+    if (!(age > 0.0f)) {
+        out.level = 1.0f;
+        out.flash = 1.0f;
+        return out;
+    }
+    if (age < attack) {
+        out.level = 1.0f;
+        out.flash = 1.0f - age / attack;
+    } else if (age < life - release) {
+        out.level = 1.0f;
+    } else if (age < life) {
+        out.level = (life - age) / release;
+    }
+    return out;
+}
+
+/* --------------------------------------------------------- chord names */
+
+/*
+ * What the callout says about a set of sounding pitches.
+ *
+ * The name is kpa_fret_chord_identify's and only its.  That namer refuses
+ * far more than it accepts - on the reference song it declines 143 of 438
+ * multi-pitch-class events - because a wrong chord symbol is worse than no
+ * chord symbol.  A screen still has to put something on that line, so what
+ * is added here is the fallback and nothing else: the pitch classes that
+ * are sounding, spelled with the same table, which is a list of notes and
+ * is never dressed up as a chord.  *out_named says which of the two it is,
+ * and the callout draws an unnamed line in dimmer ink for exactly that
+ * reason.
+ */
+void kpa_ui_internal_chord_label(const int32_t *pitches, uint32_t count,
+                                 char *out, size_t size, bool *out_named)
+{
+    kpa_fret_chord chord;
+    bool seen[12];
+    size_t used = 0u;
+    uint32_t index;
+    int32_t pitch_class;
+
+    if (out == NULL || size == 0u) return;
+    out[0] = '\0';
+    if (out_named != NULL) *out_named = false;
+    if (pitches == NULL || count == 0u) return;
+    if (kpa_fret_chord_identify(pitches, (size_t)count, &chord)) {
+        (void)snprintf(out, size, "%s", chord.name);
+        if (out_named != NULL) *out_named = true;
+        return;
+    }
+    (void)memset(seen, 0, sizeof seen);
+    for (index = 0u; index < count; ++index) {
+        if (pitches[index] < 0) continue;
+        seen[pitches[index] % 12] = true;
+    }
+    for (pitch_class = 0; pitch_class < 12; ++pitch_class) {
+        const char *name;
+        int written;
+
+        if (!seen[pitch_class]) continue;
+        name = kpa_fret_pitch_class_name(pitch_class);
+        if (name == NULL) continue;
+        written = snprintf(out + used, size - used, "%s%s",
+                           used > 0u ? " " : "", name);
+        if (written < 0 || (size_t)written >= size - used) break;
+        used += (size_t)written;
+    }
+}
+
+/* The ringing set as pitches, for the label above. */
+static uint32_t fb_ring_pitches(const kpa_fb_frame *frame, uint32_t strings,
+                                int32_t *out)
+{
+    uint32_t index;
+    uint32_t count = 0u;
+
+    for (index = 0u; index < strings && count < KPA_FRET_MAX_PITCHES;
+         ++index) {
+        if (frame->ring[index] != NULL) {
+            out[count++] = frame->ring[index]->pitch;
+        }
+    }
+    return count;
+}
+
+/* ----------------------------------------------------------- the hand */
+
+/*
+ * Where the hand is, from the shared model: a five-fret box placed by the
+ * median of the frets played over a window that reaches 0.5 s back and
+ * 1.5 s forward.  Forward-weighted on purpose - a marker that arrives with
+ * the player is telling them where they already were - and stateless, which
+ * is what keeps kpa_ui_compose a pure function of the model.  Open strings
+ * are not a hand position and do not pull it to the nut.
+ */
+static bool fb_hand(const kpa_tab *tab, double when, kpa_fret_hand *out)
+{
+    return kpa_fret_hand_at(tab, when, out);
+}
+
+/* The lowest fretted fret of one event, or 0 when it is all open strings. */
+static uint32_t fb_event_anchor(const kpa_tab *tab, uint32_t event,
+                                uint32_t strings)
+{
+    const kpa_tab_event *item;
+    uint32_t slot;
+    uint32_t anchor = 0u;
+
+    if (tab == NULL || tab->positions == NULL || event >= tab->event_count) {
+        return 0u;
+    }
+    item = &tab->events[event];
+    for (slot = 0u; slot < item->position_count; ++slot) {
+        const uint32_t at = item->first_position + slot;
+        uint32_t fret;
+
+        if (at >= tab->position_count) break;
+        if ((uint32_t)tab->positions[at].string_index >= strings) continue;
+        fret = tab->positions[at].fret;
+        if (fret == 0u) continue;
+        if (anchor == 0u || fret < anchor) anchor = fret;
+    }
+    return anchor;
+}
+
+/*
+ * The next time the hand has to move, and what it lands on.  Measured on
+ * the audited song, a move of two frets or more falls within four seconds
+ * at 98% of sampled instants, so this line almost always has something to
+ * say; when it has nothing it draws nothing rather than a placeholder.
+ *
+ * The walk is bounded rather than open: at the measured 0.092 s minimum gap
+ * between onsets, 256 events is more than twenty seconds of song, and a
+ * move further off than that is not the next thing a player needs.
+ */
+#define KPA_FB_MOVE_EVENTS 256u
+
+typedef struct kpa_fb_move {
+    bool found;
+    double when;
+    uint32_t anchor;
+    char chord[KPA_FRET_CHORD_NAME_CAPACITY];
+} kpa_fb_move;
+
+static kpa_fb_move fb_next_move(const kpa_tab *tab, double when,
+                                uint32_t strings, const kpa_fret_hand *hand)
+{
+    kpa_fb_move move;
+    uint32_t event;
+    uint32_t walked;
+
+    (void)memset(&move, 0, sizeof move);
+    if (tab == NULL || tab->events == NULL) return move;
+    event = kpa_tab_first_after(tab, when);
+    for (walked = 0u; event < tab->event_count && walked < KPA_FB_MOVE_EVENTS;
+         ++event, ++walked) {
+        const kpa_tab_event *item = &tab->events[event];
+        kpa_fret_chord chord;
+        uint32_t anchor;
+        uint32_t distance;
+
+        if (item->start <= when) continue;
+        anchor = fb_event_anchor(tab, event, strings);
+        if (anchor == 0u) continue;
+        distance = anchor > (uint32_t)hand->low
+            ? anchor - (uint32_t)hand->low
+            : (uint32_t)hand->low - anchor;
+        if (distance < 2u) continue;
+        if (kpa_fret_chord_of_event(tab, event, &chord)) {
+            (void)snprintf(move.chord, sizeof move.chord, "%s", chord.name);
+        }
+        move.found = true;
+        move.when = item->start;
+        move.anchor = anchor;
+        break;
+    }
+    return move;
 }
 
 /* ------------------------------------------------------ reserved bands */
@@ -416,6 +1010,53 @@ static int draw_transport(sr_canvas *canvas, const kpa_ui_model *model,
     return y + KPA_UI_ROW + 2;
 }
 
+/*
+ * The song's shape, drawn inside the timeline: how many notes the guitar
+ * part has in each slice of it.  A player looking for the solo, or for the
+ * quiet bar before the chorus, can see where it is instead of scrubbing for
+ * it.  One pass over the events into a fixed set of buckets, so the cost
+ * does not grow with the width of the terminal.
+ */
+#define KPA_UI_DENSITY_BUCKETS 192
+
+static void draw_density(sr_canvas *canvas, const kpa_tab *tab, double span,
+                         int x, int y, int width, int height)
+{
+    uint16_t bucket[KPA_UI_DENSITY_BUCKETS];
+    uint32_t event;
+    uint16_t peak = 0u;
+    int index;
+
+    if (tab == NULL || tab->events == NULL || width <= 0 || !(span > 0.0)) {
+        return;
+    }
+    (void)memset(bucket, 0, sizeof bucket);
+    for (event = 0u; event < tab->event_count; ++event) {
+        const double at = tab->events[event].start / span;
+        int slot;
+
+        if (!(at >= 0.0) || at >= 1.0) continue;
+        slot = (int)(at * (double)KPA_UI_DENSITY_BUCKETS);
+        if (slot < 0 || slot >= KPA_UI_DENSITY_BUCKETS) continue;
+        if (bucket[slot] < 0xFFFFu) ++bucket[slot];
+        if (bucket[slot] > peak) peak = bucket[slot];
+    }
+    if (peak == 0u) return;
+    for (index = 0; index < KPA_UI_DENSITY_BUCKETS; ++index) {
+        const float share = (float)bucket[index] / (float)peak;
+        const float bar = (float)height * share;
+        const float x0 = (float)x + (float)width * (float)index /
+                                    (float)KPA_UI_DENSITY_BUCKETS;
+        const float x1 = (float)x + (float)width * (float)(index + 1) /
+                                    (float)KPA_UI_DENSITY_BUCKETS;
+
+        if (bucket[index] == 0u) continue;
+        sr_fill_rect(canvas, x0, (float)y + (float)height - bar,
+                     x1 - x0 > 1.0f ? x1 - x0 : 1.0f, bar, KPA_UI_FAINT,
+                     0.9f);
+    }
+}
+
 static int draw_timeline(sr_canvas *canvas, const kpa_ui_model *model,
                          int y, int bottom)
 {
@@ -430,6 +1071,9 @@ static int draw_timeline(sr_canvas *canvas, const kpa_ui_model *model,
     if (width <= 16 || y + height + 8 > bottom) return y;
     sr_fill_rect(canvas, (float)left, (float)y, (float)width, (float)height,
                  KPA_UI_RAISED, 1.0f);
+    if (model->overview == KPA_OVERVIEW_DENSITY) {
+        draw_density(canvas, model->tab, span, left, y, width, height);
+    }
     if (model->loop_active && model->loop_end > model->loop_start) {
         const double start = clamp_double(model->loop_start / span, 0.0, 1.0);
         const double end = clamp_double(model->loop_end / span, 0.0, 1.0);
@@ -512,6 +1156,836 @@ static int draw_mixer(sr_canvas *canvas, const kpa_ui_model *model,
     return y + 4;
 }
 
+/* ---------------------------------------------------- practice layout */
+
+#define KPA_UI_TRANSPORT_H 22
+#define KPA_UI_TIMELINE_H 20
+
+/*
+ * Where each band of the practice view goes, decided in one place so that
+ * draw_practice stops doing arithmetic between its widgets and so that what
+ * gets given up on a shrinking terminal is a list rather than an accident.
+ *
+ * A -1 means "not drawn"; heights of 0 mean the same for the bands that
+ * carry one.  Drop order, most expendable first: the tab lane, the fret
+ * ruler, the approach ramp, the mixer's rows (which become a one-line
+ * strip), the fretboard block, the timeline.  The transport is last and is
+ * always drawn if anything is.
+ *
+ * Every proportion below is chosen rather than measured.  What this produces
+ * is not: at the 1280x720 --render size, with the audited project's six
+ * stems and the lyric band shown, the reserved bands take 48 px off the top
+ * and 156 off the bottom, and the 516 px left over come out as transport 22,
+ * timeline 20, mixer 124, fretboard 215 (callout 18, ramp 54, neck 129 -
+ * 21.5 px a string - and ruler 14), tab lane 133.  The neck's wood in that
+ * frame runs from y 288 to y 416, which is where this says it should.
+ */
+typedef struct kpa_practice_layout {
+    int transport_y;
+    int timeline_y;
+    int mixer_y;
+    int mixer_h;
+    bool mixer_compact;
+    int fb_y;
+    int fb_h;               /* the whole fretboard block; 0 when absent */
+    int callout_y;
+    int ramp_y;
+    int ramp_h;
+    int neck_y;
+    int neck_h;
+    int ruler_y;            /* -1 when the ruler was given up */
+    int lane_y;
+    int lane_h;             /* 0 when the lane is not drawn */
+    int notice_y;           /* -1 when there is no line to say anything on */
+    bool lane_dropped;      /* asked for and refused: say so */
+} kpa_practice_layout;
+
+static void practice_layout(const kpa_ui_model *model, int top, int bottom,
+                            int width, kpa_practice_layout *out)
+{
+    /* Ruler and ramp in the order they are given up: both, then the ramp
+     * alone, then neither.  The first that leaves the neck a readable
+     * height wins. */
+    static const bool candidate_ruler[3] = {true, false, false};
+    static const bool candidate_ramp[3] = {true, true, false};
+    const uint32_t strings = fb_string_count(model->tab);
+    const int min_neck = (int)strings * KPA_FB_PITCH_MIN;
+    int y = top + 2;
+    int floor_y = bottom;
+    int rest;
+    int mixer_full;
+    size_t candidate;
+
+    (void)memset(out, 0, sizeof *out);
+    out->transport_y = -1;
+    out->timeline_y = -1;
+    out->mixer_y = -1;
+    out->callout_y = -1;
+    out->ramp_y = -1;
+    out->neck_y = -1;
+    out->ruler_y = -1;
+    out->lane_y = -1;
+    out->notice_y = -1;
+    if (bottom - top < KPA_UI_ROW) return;
+
+    /* The notice takes its own line off the bottom rather than being drawn
+     * over whatever is there, which is what this view has always done. */
+    if (model->notice[0] != '\0' && bottom - KPA_UI_LINE > top) {
+        floor_y = bottom - KPA_UI_LINE;
+        out->notice_y = floor_y + 2;
+    }
+
+    if (y + KPA_UI_ROW > floor_y) return;
+    out->transport_y = y;
+    y += KPA_UI_TRANSPORT_H;
+    if (y + KPA_UI_TIMELINE_H + 2 > floor_y) return;
+    out->timeline_y = y;
+    y += KPA_UI_TIMELINE_H;
+
+    rest = floor_y - y;
+    if (rest <= 0) return;
+
+    /*
+     * The mixer.  Full rows cost track_count * 20 px of height; the compact
+     * strip costs one row of height and about 40 px of width per stem, so
+     * five stems fit in 200 px across instead of 100 px down.  That trade is
+     * only worth making when something else wants the height, which here
+     * means a fretboard that would otherwise be cramped.
+     */
+    mixer_full = model->track_count > 0u
+        ? (int)model->track_count * KPA_UI_ROW + 4 : 0;
+    if (mixer_full > 0) {
+        const bool wants_neck = model->fretboard != KPA_FB_OFF;
+        const bool strip_fits = width >= (int)model->track_count * 40 + 16;
+
+        if (!wants_neck || !strip_fits ||
+            rest - mixer_full >= KPA_FB_BLOCK_FULL) {
+            out->mixer_h = mixer_full;
+        } else {
+            out->mixer_h = KPA_UI_ROW;
+            out->mixer_compact = true;
+        }
+        if (out->mixer_h > rest) out->mixer_h = rest;
+        if (out->mixer_h >= KPA_UI_ROW) {
+            out->mixer_y = y;
+            y += out->mixer_h;
+        } else {
+            out->mixer_h = 0;
+        }
+        rest = floor_y - y;
+    }
+
+    /* The fretboard block. */
+    if (model->fretboard != KPA_FB_OFF && rest >= KPA_FB_BLOCK_MIN) {
+        int block = (rest * 62) / 100;
+
+        if (block > KPA_FB_BLOCK_MAX) block = KPA_FB_BLOCK_MAX;
+        if (block < KPA_FB_BLOCK_FULL) block = KPA_FB_BLOCK_FULL;
+        if (block > rest) block = rest;
+        for (candidate = 0u; candidate < 3u; ++candidate) {
+            const int ruler = candidate_ruler[candidate] ? KPA_FB_RULER_H : 0;
+            int ramp = 0;
+            int neck;
+
+            if (candidate_ramp[candidate] &&
+                model->fretboard == KPA_FB_NECK_AND_RAMP) {
+                ramp = ((block - KPA_FB_CALLOUT_H - ruler) * 30) / 100;
+                /* A ramp too short to show half a second of look-ahead is
+                 * not a ramp; the neck has the height instead. */
+                if (ramp < 24) ramp = 0;
+            }
+            neck = block - KPA_FB_CALLOUT_H - ruler - ramp;
+            if (neck < min_neck) continue;
+            out->fb_y = y;
+            out->fb_h = block;
+            out->callout_y = y;
+            out->ramp_y = y + KPA_FB_CALLOUT_H;
+            out->ramp_h = ramp;
+            out->neck_y = out->ramp_y + ramp;
+            out->neck_h = neck;
+            out->ruler_y = ruler > 0 ? out->neck_y + neck : -1;
+            y += block;
+            break;
+        }
+        rest = floor_y - y;
+    }
+
+    /* Whatever is left is the tab lane's, if it is enough to read. */
+    if (model->tab_visible) {
+        if (rest >= KPA_UI_LANE_MIN) {
+            out->lane_y = y;
+            out->lane_h = rest;
+        } else if (out->fb_h > 0) {
+            /* The old code dropped the lane in silence.  A player who asked
+             * for both and got one is owed the sentence that says which key
+             * gives them the other. */
+            out->lane_dropped = true;
+            if (out->notice_y < 0 && bottom - y >= KPA_UI_LINE) {
+                out->notice_y = bottom - KPA_UI_LINE + 2;
+            }
+        }
+    }
+}
+
+/*
+ * The mixer as one row: four characters of each stem's name, a gain bar and
+ * its mute and solo marks.  Everything the rows carry except the numeric
+ * gain, in a fifth of the height.
+ */
+static void draw_mixer_strip(sr_canvas *canvas, const kpa_ui_model *model,
+                             int y, int bottom)
+{
+    const int left = KPA_UI_MARGIN;
+    const int right = canvas->w - KPA_UI_MARGIN;
+    const int slot = 40;
+    uint32_t index;
+    bool any_solo = false;
+
+    if (y + KPA_UI_ROW > bottom || model->track_count == 0u) return;
+    for (index = 0u; index < model->track_count &&
+                     index < KPA_MAX_TRACKS; ++index) {
+        if (model->tracks[index].soloed) any_solo = true;
+    }
+    for (index = 0u; index < model->track_count &&
+                     index < KPA_MAX_TRACKS; ++index) {
+        const kpa_ui_track *track = &model->tracks[index];
+        const bool selected = index == model->selected_track;
+        const bool audible = !track->muted && (!any_solo || track->soloed);
+        const int x = left + (int)index * slot;
+        char label[8];
+        size_t at;
+
+        if (x + slot > right) break;
+        if (selected) {
+            sr_fill_rect(canvas, (float)x - 2.0f, (float)y,
+                         (float)slot, (float)KPA_UI_ROW, KPA_UI_RAISED, 1.0f);
+        }
+        /* Four characters of the label, which is what tells Bass from Both
+         * without a column of full names. */
+        for (at = 0u; at < 4u; ++at) {
+            label[at] = track->label[at];
+            if (label[at] == '\0') break;
+        }
+        label[at < 4u ? at : 4u] = '\0';
+        draw_text_fit(canvas, x, y + 1, label,
+                      audible ? KPA_UI_TEXT : KPA_UI_DIM, 32);
+        draw_meter(canvas, x, y + 14, 24, 3, track->gain / KPA_UI_GAIN_MAX,
+                   audible ? KPA_UI_ACCENT : KPA_UI_DIM);
+        if (track->muted) {
+            draw_text_fit(canvas, x + 26, y + 1, "M", KPA_UI_ALERT, 10);
+        }
+        if (track->soloed) {
+            draw_text_fit(canvas, x + 26, y + 9, "S", KPA_UI_GOOD, 10);
+        }
+    }
+}
+
+/* ------------------------------------------------ drawing the fretboard */
+
+/*
+ * The drawn neck, from the block the layout allotted.  The rail on the left
+ * carries the chord shape above and the string names beside their own
+ * strings, at a constant x - the same pinning the tab lane's gutter has, and
+ * for the same reason.
+ */
+static void fb_geometry(const kpa_ui_model *model,
+                        const kpa_practice_layout *layout, int left,
+                        int right, kpa_fb_geom *out)
+{
+    const float wood_x0 = (float)(left + KPA_FB_RAIL);
+    const float wood_x1 = (float)right;
+
+    (void)memset(out, 0, sizeof *out);
+    out->strings = fb_string_count(model->tab);
+    out->max_fret = fb_max_fret(model->tab);
+    out->low_on_top = model->low_string_on_top;
+    out->left_handed = model->left_handed;
+    out->wood_x0 = wood_x0;
+    out->wood_x1 = wood_x1;
+    /* The nut sits a little inside the wood so its bar and the open-string
+     * marks on it have somewhere to be.  Mirroring is about the wood rather
+     * than about the board, so a left-handed neck puts that margin on the
+     * right where the nut now is. */
+    out->board.x = (double)(wood_x0 + KPA_FB_NUT_MARGIN);
+    out->board.y = (double)layout->neck_y;
+    out->board.width = (double)wood_x1 - out->board.x;
+    out->board.height = (double)layout->neck_h;
+    out->mirror_sum = wood_x0 + wood_x1;
+    out->y0 = layout->neck_y;
+    out->y1 = layout->neck_y + layout->neck_h;
+    out->string_pitch = (float)layout->neck_h / (float)out->strings;
+    out->nut_x = neck_mirror(out, (float)out->board.x);
+    out->far_x = neck_mirror(out, (float)(out->board.x + out->board.width));
+}
+
+/* The width of the space behind fret n, which is what decides whether a
+ * fret number or a note name will fit inside a dot drawn there. */
+static float fb_cell_width(const kpa_fb_geom *geometry, uint32_t fret)
+{
+    float behind;
+    float at;
+
+    if (fret == 0u) return KPA_FB_NUT_MARGIN * 2.0f;
+    behind = neck_wire_x(geometry, fret - 1u);
+    at = neck_wire_x(geometry, fret);
+    return at > behind ? at - behind : behind - at;
+}
+
+static void fb_note_text(const kpa_ui_model *model, const kpa_fret_note *note,
+                         char *out, size_t size)
+{
+    const char *name = kpa_fret_pitch_class_name(note->pitch % 12);
+
+    out[0] = '\0';
+    if (name == NULL) name = "?";
+    switch (model->note_label) {
+    case KPA_LABEL_NOTE:
+        (void)snprintf(out, size, "%s", name);
+        break;
+    case KPA_LABEL_BOTH:
+        (void)snprintf(out, size, "%d%s", (int)note->fret, name);
+        break;
+    case KPA_LABEL_FRET:
+    default:
+        (void)snprintf(out, size, "%d", (int)note->fret);
+        break;
+    }
+}
+
+/*
+ * The frets, the inlays and the strings: the instrument with nothing played
+ * on it yet.
+ */
+static void draw_neck_furniture(sr_canvas *canvas, const kpa_fb_geom *geometry)
+{
+    const float board_h = (float)(geometry->y1 - geometry->y0);
+    const float inlay_r = geometry->string_pitch * 0.35f < 6.0f
+        ? geometry->string_pitch * 0.35f : 6.0f;
+    uint32_t fret;
+    uint32_t api;
+
+    sr_fill_rect(canvas, geometry->wood_x0, (float)geometry->y0,
+                 geometry->wood_x1 - geometry->wood_x0, board_h,
+                 KPA_FB_WOOD, 1.0f);
+    for (fret = 1u; fret <= geometry->max_fret; ++fret) {
+        const float x = neck_wire_x(geometry, fret);
+        const kpa_fret_inlay inlay = kpa_fret_inlay_at((int32_t)fret);
+        const float dot_x = neck_finger_x(geometry, fret);
+
+        sr_line(canvas, x, (float)geometry->y0, x, (float)geometry->y1, 1.5f,
+                KPA_FB_NICKEL, 1.0f, 0, 0);
+        /* The marker goes in the space behind the wire, never on it: a dot
+         * drawn on the wire shifts every marker toward the bridge and makes
+         * a correctly spaced neck read as mis-spaced. */
+        if (inlay == KPA_FRET_INLAY_SINGLE) {
+            sr_fill_circle(canvas, dot_x,
+                           (float)geometry->y0 + board_h * 0.5f, inlay_r,
+                           KPA_FB_PEARL, 0.8f);
+        } else if (inlay == KPA_FRET_INLAY_DOUBLE) {
+            sr_fill_circle(canvas, dot_x,
+                           (float)geometry->y0 + board_h / 3.0f, inlay_r,
+                           KPA_FB_PEARL, 0.8f);
+            sr_fill_circle(canvas, dot_x,
+                           (float)geometry->y0 + board_h * 2.0f / 3.0f,
+                           inlay_r, KPA_FB_PEARL, 0.8f);
+        }
+    }
+    /* The nut, last of the furniture and thicker than any fret. */
+    sr_fill_rect(canvas, geometry->nut_x - 2.0f, (float)geometry->y0, 4.0f,
+                 board_h, KPA_FB_BONE, 1.0f);
+    for (api = 0u; api < geometry->strings; ++api) {
+        const float y = neck_string_y(geometry, api);
+        const float base = geometry->string_pitch * 0.06f < 1.6f
+            ? geometry->string_pitch * 0.06f : 1.6f;
+
+        sr_line(canvas, geometry->wood_x0, y, geometry->wood_x1, y,
+                fb_string_width(api, base > 0.9f ? base : 0.9f),
+                api < 3u ? KPA_FB_WOUND : KPA_FB_PLAIN, 1.0f, 0, 0);
+    }
+}
+
+/*
+ * The five-fret box over where the hand is.  Everything about it comes from
+ * kpa_fret_hand_at, including the fact that it never covers the nut: an open
+ * string needs no hand and does not pull the box down to the first fret.
+ */
+static void draw_hand_box(sr_canvas *canvas, const kpa_fb_geom *geometry,
+                          const kpa_fret_hand *hand)
+{
+    const float first = neck_wire_x(geometry, (uint32_t)hand->low - 1u);
+    const float last = neck_wire_x(geometry, (uint32_t)hand->high);
+    const float x0 = first < last ? first : last;
+    const float x1 = first < last ? last : first;
+    const float y = (float)geometry->y0 - 3.0f;
+    const float h = (float)(geometry->y1 - geometry->y0) + 6.0f;
+
+    /* Faint enough that the wood, the inlays and the fret wires under it
+     * all still read: it says where the hand is, it does not replace the
+     * part of the neck the hand is on.  The fill matches the browser's 0.16;
+     * the outline is much softer than the 0.55 it carried when this shared
+     * the loop's colour, because at 1280x720 that edge was the loudest thing
+     * on the neck and the box read as a selection rather than as a hand.
+     *
+     * The fill stays at 0.09 and deliberately does NOT copy the browser's
+     * 0.16: that alpha is tuned against a lighter board, and rendered over
+     * this one it turns the box into a solid green slab that outshouts the
+     * strings it sits behind. Same colour, same meaning, different ground --
+     * so the number that matches is the one that looks the same, not the one
+     * that reads the same in the source. Checked by rendering both. */
+    sr_fill_rect(canvas, x0, y, x1 - x0, h, KPA_UI_HAND, 0.09f);
+    sr_stroke_rect(canvas, x0, y, x1 - x0, h, 1.0f, KPA_UI_HAND, 0.28f);
+}
+
+/*
+ * One sounding note.  The dot is where the finger is; the string is redrawn
+ * either side of it - dead between the nut and the finger, standing wave
+ * from the finger to the far end - which is the thing that makes the picture
+ * read as a guitar being played rather than as dots on a diagram.
+ *
+ * The wave is a function of model->position and of nothing else, so it is
+ * frozen while the player is paused.  That is correct: a paused guitar is
+ * not vibrating.
+ */
+static void draw_sounding_note(sr_canvas *canvas, const kpa_ui_model *model,
+                               const kpa_fb_geom *geometry,
+                               const kpa_fret_note *note, uint32_t api,
+                               double when)
+{
+    const kpa_fb_envelope envelope = fb_envelope(note, when);
+    const uint32_t fret = note->fret >= 0 ? (uint32_t)note->fret : 0u;
+    const float y = neck_string_y(geometry, api);
+    const float x = neck_finger_x(geometry, fret);
+    const uint32_t ink = kpa_string_rgb[api < KPA_STRING_COUNT ? api : 0u];
+    const float cell = fb_cell_width(geometry, fret);
+    const bool muted_by_capo = model->capo > 0u && fret > 0u &&
+                               fret < (uint32_t)model->capo;
+    float radius;
+    float amplitude;
+    float phase;
+    int segment;
+    char label[8];
+
+    if (!(envelope.level > 0.0f)) return;
+    /* Bounded by the string spacing as well as by the fret it sits behind,
+     * so that a chord barred across one fret reads as one dot per string
+     * rather than as a blob.  The spacing is 13 px at its tightest, and 528
+     * of the audited song's 937 events sound two or more notes at once. */
+    radius = geometry->string_pitch * 0.38f;
+    if (radius > cell * 0.40f) radius = cell * 0.40f;
+    if (radius > 9.0f) radius = 9.0f;
+    if (radius < 2.0f) radius = 2.0f;
+
+    /*
+     * The vibrating length: an open string rings from the nut, a fretted one
+     * from the finger.  Amplitude is capped at a fifth of the string spacing
+     * so a loud note can never smear into the string next to it.
+     */
+    amplitude = 2.6f * (0.6f * envelope.flash + 0.4f * envelope.level);
+    if (amplitude > geometry->string_pitch * 0.2f) {
+        amplitude = geometry->string_pitch * 0.2f;
+    }
+    /* Dead between the nut and the finger.  An open string has no such
+     * length: x is the nut for fret 0. */
+    if (fret > 0u) {
+        sr_line(canvas, geometry->nut_x, y, x, y, 1.0f, KPA_UI_FAINT, 0.45f,
+                0, 0);
+    }
+    /*
+     * ...and a standing wave from there to the end of the board, with a node
+     * at each end, drawn as twelve segments.  It is a function of
+     * model->position and of nothing else, so a paused player sees a still
+     * string - which is correct: a paused guitar is not vibrating.
+     */
+    phase = sinf(6.2831853f * 6.0f * (float)when);
+    for (segment = 0; segment < 12; ++segment) {
+        const float t0 = (float)segment / 12.0f;
+        const float t1 = (float)(segment + 1) / 12.0f;
+        const float x0 = x + (geometry->far_x - x) * t0;
+        const float x1 = x + (geometry->far_x - x) * t1;
+        const float y0 = y + amplitude * sinf(3.14159265f * t0) * phase;
+        const float y1 = y + amplitude * sinf(3.14159265f * t1) * phase;
+
+        sr_line(canvas, x0, y0, x1, y1, 1.0f, ink,
+                0.35f + 0.65f * envelope.level, 0, 0);
+    }
+
+    if (muted_by_capo) {
+        /* Never drawn at a negative fret: the note is where the artifact
+         * says it is, and the mark says it cannot be played from here. */
+        sr_ring(canvas, x, y, radius, 1.5f, KPA_UI_ALERT, 0.9f);
+        sr_line(canvas, x - radius * 0.6f, y - radius * 0.6f,
+                x + radius * 0.6f, y + radius * 0.6f, 1.5f, KPA_UI_ALERT,
+                0.9f, 0, 0);
+        sr_line(canvas, x - radius * 0.6f, y + radius * 0.6f,
+                x + radius * 0.6f, y - radius * 0.6f, 1.5f, KPA_UI_ALERT,
+                0.9f, 0, 0);
+        return;
+    }
+    if (fret == 0u) {
+        /* An open string is a ring on the nut, which is what a chord box
+         * means by `o`.  Distinguishing open from silent matters: 15% of the
+         * audited song's positions are open strings. */
+        sr_ring(canvas, x, y, radius * 0.8f, 2.0f, ink,
+                0.35f + 0.65f * envelope.level);
+        return;
+    }
+    radius *= (0.72f + 0.28f * envelope.level) *
+              (1.0f + 0.40f * envelope.flash);
+    if (radius > geometry->string_pitch * 0.46f) {
+        radius = geometry->string_pitch * 0.46f;
+    }
+    sr_fill_circle(canvas, x, y, radius, ink,
+                   0.25f + 0.75f * envelope.level);
+    if (envelope.flash > 0.0f) {
+        /* The pluck: a ring that expands out of the dot and is gone by the
+         * time the note is merely sounding. */
+        sr_ring(canvas, x, y, radius * (1.0f + 0.6f * envelope.flash), 1.5f,
+                ink, 0.7f * envelope.flash);
+    }
+    fb_note_text(model, note, label, sizeof label);
+    if (label[0] != '\0' &&
+        radius * 2.0f >= (float)sr_text_width(label, 1) + 2.0f) {
+        sr_text(canvas, x - (float)sr_text_width(label, 1) * 0.5f, y - 8.0f,
+                label, KPA_UI_BACKDROP, 1.0f, 1);
+    }
+}
+
+/*
+ * The approach ramp: time running downward onto the neck, sharing the neck's
+ * x mapping exactly, so a mark reaches the string it belongs to at the
+ * instant that note sounds.
+ */
+static void draw_ramp(sr_canvas *canvas, const kpa_ui_model *model,
+                      const kpa_fb_geom *geometry, const kpa_fb_frame *frame,
+                      const kpa_practice_layout *layout)
+{
+    const float window = model_ramp_seconds(model);
+    const float top = (float)layout->ramp_y;
+    const float height = (float)layout->ramp_h;
+    uint32_t index;
+    float mark;
+    char line[32];
+
+    if (layout->ramp_h <= 0) return;
+    /* Half a second per gridline, so the distance to the next chord is
+     * readable rather than merely visible. */
+    for (mark = 0.5f; mark < window; mark += 0.5f) {
+        const float y = top + height * (1.0f - mark / window);
+
+        sr_line(canvas, geometry->wood_x0, y, geometry->wood_x1, y, 1.0f,
+                KPA_UI_FAINT, 0.5f, 0, 0);
+    }
+    /*
+     * At the top of the band, and at the end of the neck furthest from the
+     * nut: the marks crowd toward the nut because 93% of this song's notes
+     * are at fret 8 or below, so the far end is the corner with room in it.
+     * Which end that is depends on which hand the player uses.
+     */
+    (void)snprintf(line, sizeof line, "%.1fs ahead", (double)window);
+    if (geometry->left_handed) {
+        draw_text_fit(canvas, (int)geometry->wood_x0 + 2, layout->ramp_y + 1,
+                      line, KPA_UI_FAINT, 100);
+    } else {
+        draw_text_right(canvas, (int)geometry->wood_x1, layout->ramp_y + 1,
+                        line, KPA_UI_FAINT, 100);
+    }
+    for (index = 0u; index < frame->report.count; ++index) {
+        const kpa_fret_note *note = &frame->notes[index];
+        const uint32_t api = (uint32_t)note->string_index;
+        float remaining;
+        float u;
+        float x;
+        float y;
+        float comb;
+        float cell;
+
+        if (!fb_note_arriving(note, frame->when)) continue;
+        if (note->string_index < 0 || api >= geometry->strings) continue;
+        if (note->out_of_range || note->fret < 0) continue;
+        /* Measured from the instant being drawn.  note->time_to_start is
+         * measured from the one the query was made at, which is earlier. */
+        remaining = (float)(note->start - frame->when);
+        u = remaining / window;
+        if (u < 0.0f) u = 0.0f;
+        if (u > 1.0f) continue;
+        cell = fb_cell_width(geometry, (uint32_t)note->fret);
+        comb = cell * 0.14f;
+        if (comb > 3.0f) comb = 3.0f;
+        /* The comb offset: six notes at one fret would otherwise be one dot
+         * six deep.  Fanned by string it reads as a strum. */
+        x = neck_finger_x(geometry, (uint32_t)note->fret) +
+            ((float)string_display_row(api, geometry->strings,
+                                       geometry->low_on_top) -
+             ((float)geometry->strings - 1.0f) * 0.5f) * comb;
+        y = top + height * (1.0f - u);
+        if (remaining <= 0.5f) {
+            /* Close enough to be the next thing the hand does: a dashed
+             * line saying where it goes. */
+            sr_line(canvas, x, y, x, top + height, 1.0f,
+                    kpa_string_rgb[api < KPA_STRING_COUNT ? api : 0u], 0.18f,
+                    3, 3);
+        }
+        sr_fill_circle(canvas, x, y, 3.0f,
+                       kpa_string_rgb[api < KPA_STRING_COUNT ? api : 0u],
+                       0.30f + 0.70f * (1.0f - u));
+    }
+}
+
+/*
+ * The chord shape, in the rail, as a guitarist reads one: strings across,
+ * frets down, a dot where a finger goes, a ring on an open string and a
+ * cross on one that is not sounding.  The strings run in the same order as
+ * the neck beside it, so the box and the instrument agree.
+ */
+static void draw_chord_box(sr_canvas *canvas, const kpa_fb_geom *geometry,
+                           const kpa_fb_frame *frame, const kpa_fret_hand *hand,
+                           bool has_hand, int x, int y, int width, int height)
+{
+    const uint32_t strings = geometry->strings;
+    const int column = width / (int)(strings + 1u);
+    const int mark_h = 7;
+    int rows = (height - mark_h - 2) / 8;
+    const uint32_t first = has_hand ? (uint32_t)hand->low : 1u;
+    uint32_t api;
+    int row;
+    int grid_x;
+    int grid_y;
+    int row_h;
+    char label[8];
+
+    if (column < 5 || rows < 3) return;
+    if (rows > KPA_FRET_HAND_FRETS) rows = KPA_FRET_HAND_FRETS;
+    row_h = (height - mark_h - 2) / rows;
+    if (row_h > 10) row_h = 10;
+    grid_x = x + column;                    /* one column for the fret number */
+    grid_y = y + mark_h + 2;
+
+    for (row = 0; row <= rows; ++row) {
+        const float line_y = (float)(grid_y + row * row_h);
+
+        sr_line(canvas, (float)grid_x, line_y,
+                (float)(grid_x + column * (int)(strings - 1u)), line_y, 1.0f,
+                row == 0 ? KPA_FB_BONE : KPA_UI_FAINT, row == 0 ? 0.9f : 0.7f,
+                0, 0);
+    }
+    for (api = 0u; api < strings; ++api) {
+        const uint32_t display = string_display_row(api, strings,
+                                                    geometry->low_on_top);
+        const int sx = grid_x + (int)display * column;
+        const kpa_fret_note *note = frame->ring[api];
+
+        sr_line(canvas, (float)sx, (float)grid_y, (float)sx,
+                (float)(grid_y + rows * row_h), 1.0f, KPA_UI_FAINT, 0.7f,
+                0, 0);
+        if (note == NULL) {
+            sr_line(canvas, (float)sx - 2.0f, (float)y, (float)sx + 2.0f,
+                    (float)(y + 5), 1.0f, KPA_UI_DIM, 0.8f, 0, 0);
+            sr_line(canvas, (float)sx - 2.0f, (float)(y + 5), (float)sx + 2.0f,
+                    (float)y, 1.0f, KPA_UI_DIM, 0.8f, 0, 0);
+            continue;
+        }
+        if (note->fret == 0) {
+            sr_ring(canvas, (float)sx, (float)(y + 3), 2.5f, 1.0f,
+                    KPA_UI_TEXT, 0.9f);
+            continue;
+        }
+        if ((uint32_t)note->fret >= first &&
+            (uint32_t)note->fret < first + (uint32_t)rows) {
+            const int offset = note->fret - (int)first;
+
+            sr_fill_circle(canvas, (float)sx,
+                           (float)(grid_y + offset * row_h + row_h / 2), 3.0f,
+                           kpa_string_rgb[api < KPA_STRING_COUNT ? api : 0u],
+                           1.0f);
+        }
+    }
+    /* The fret the box starts at, or the shape means nothing. */
+    if (has_hand) {
+        (void)snprintf(label, sizeof label, "%d", (int)first);
+        draw_text_fit(canvas, x, grid_y + row_h / 2 - 8, label, KPA_UI_DIM,
+                      column + 2);
+    }
+}
+
+/*
+ * The callout: where the hand is, what is sounding, and where it has to go
+ * next.  One 8x16 line, which is why the chord name is drawn at scale 1 and
+ * carries its weight through ink rather than size - scale 2 is 32 px tall
+ * and this band is 18.
+ */
+static void draw_callout(sr_canvas *canvas, const kpa_ui_model *model,
+                         const kpa_fb_frame *frame, const kpa_fret_hand *hand,
+                         bool has_hand, double when, int x, int y, int width,
+                         uint32_t strings)
+{
+    char line[KPA_UI_LINE_CAPACITY];
+    char chord[32];
+    bool named = false;
+    int cursor = x;
+    int room;
+
+    if (width <= 0) return;
+    if (has_hand) {
+        (void)snprintf(line, sizeof line, "pos %d", (int)hand->low);
+    } else {
+        (void)snprintf(line, sizeof line, "open");
+    }
+    draw_text_fit(canvas, cursor, y + 1, line, KPA_UI_DIM, 64);
+    cursor += 64;
+
+    /*
+     * The latched label when the caller keeps one, and the label of what is
+     * ringing right now when it does not.  A still has no history, so
+     * main.c's one-frame render gets the honest unlatched answer with no
+     * special case anywhere outside this line.
+     */
+    if (model->chord[0] != '\0') {
+        (void)snprintf(chord, sizeof chord, "%s", model->chord);
+        named = model->chord_kind != 0u;
+    } else {
+        int32_t pitches[KPA_FRET_MAX_PITCHES];
+        const uint32_t count = fb_ring_pitches(frame, strings, pitches);
+
+        kpa_ui_internal_chord_label(pitches, count, chord, sizeof chord,
+                                    &named);
+    }
+    if (chord[0] != '\0') {
+        draw_text_fit(canvas, cursor, y + 1, chord,
+                      named ? KPA_UI_TEXT : KPA_UI_DIM, 120);
+    }
+    cursor += 128;
+    room = x + width - cursor;
+    if (room <= 0) return;
+    if (has_hand) {
+        const kpa_fb_move move = fb_next_move(model->tab, when, strings, hand);
+
+        if (!move.found) return;
+        if (move.chord[0] != '\0') {
+            (void)snprintf(line, sizeof line, "-> pos %u, %s  in %.1fs",
+                           (unsigned)move.anchor, move.chord,
+                           move.when - when);
+        } else {
+            (void)snprintf(line, sizeof line, "-> pos %u  in %.1fs",
+                           (unsigned)move.anchor, move.when - when);
+        }
+        draw_text_fit(canvas, cursor, y + 1, line, KPA_UI_WARN, room);
+    }
+}
+
+/* The fret numbers under the neck, bright inside the hand's box and dim
+ * outside it, which is how the neck itself says where the hand is. */
+static void draw_fret_ruler(sr_canvas *canvas, const kpa_fb_geom *geometry,
+                            const kpa_fret_hand *hand, bool has_hand, int y)
+{
+    uint32_t fret;
+
+    for (fret = 1u; fret <= geometry->max_fret; ++fret) {
+        const bool marked = kpa_fret_inlay_at((int32_t)fret) !=
+                            KPA_FRET_INLAY_NONE;
+        const bool inside = has_hand && (int32_t)fret >= hand->low &&
+                            (int32_t)fret <= hand->high;
+        const float cell = fb_cell_width(geometry, fret);
+        char label[8];
+        int width;
+
+        /* Every fret while there is room for its number, and only the
+         * marked frets once the cells are narrower than that. */
+        if (cell < 20.0f && !marked && !inside) continue;
+        (void)snprintf(label, sizeof label, "%u", (unsigned)fret);
+        width = sr_text_width(label, 1);
+        sr_text(canvas, neck_finger_x(geometry, fret) - (float)width * 0.5f,
+                (float)y, label, inside ? KPA_UI_TEXT : KPA_UI_DIM, 1.0f, 1);
+    }
+}
+
+/*
+ * The whole fretboard block.  Clipped to its own rectangle for the same
+ * reason the tab lane is: the clip, not the arithmetic inside it, is what
+ * keeps a widget out of the band next to it.  The four clip values are saved
+ * and put back by hand - never sr_canvas_reset_clip, which would throw away
+ * the band protection kpa_ui_compose set.
+ */
+static void draw_fretboard(sr_canvas *canvas, const kpa_ui_model *model,
+                           const kpa_practice_layout *layout)
+{
+    static const char *const default_labels[KPA_STRING_COUNT] = {
+        "E", "A", "D", "G", "B", "e"
+    };
+    const int left = KPA_UI_MARGIN;
+    const int right = canvas->w - KPA_UI_MARGIN;
+    const int clip_x0 = canvas->clip_x0;
+    const int clip_y0 = canvas->clip_y0;
+    const int clip_x1 = canvas->clip_x1;
+    const int clip_y1 = canvas->clip_y1;
+    const double when = model->position;
+    kpa_fb_geom geometry;
+    kpa_fret_hand hand;
+    /* On the stack deliberately: composition is a pure function of the
+     * model, and an allocation that can fail is a branch that would make it
+     * one of two pictures.  About seven kilobytes at KPA_FB_MAX_NOTES. */
+    kpa_fb_frame frame;
+    bool has_hand;
+    uint32_t api;
+
+    if (layout->fb_h <= 0 || right - left < KPA_FB_RAIL + 80) return;
+    /* Zeroed before it is asked for: every reader below is guarded by
+     * has_hand, and a struct that is only conditionally written is one
+     * refactor away from being read anyway. */
+    (void)memset(&hand, 0, sizeof hand);
+    fb_geometry(model, layout, left, right, &geometry);
+    (void)fb_collect(&frame, model->tab, when, model_ramp_seconds(model),
+                     geometry.strings);
+    has_hand = fb_hand(model->tab, when, &hand);
+
+    sr_canvas_set_clip(canvas, left, layout->fb_y, right - left,
+                       layout->fb_h);
+    draw_neck_furniture(canvas, &geometry);
+    if (has_hand) draw_hand_box(canvas, &geometry, &hand);
+    for (api = 0u; api < geometry.strings; ++api) {
+        if (frame.ring[api] == NULL) continue;
+        draw_sounding_note(canvas, model, &geometry, frame.ring[api], api,
+                           when);
+    }
+    if (layout->ramp_h > 0) {
+        draw_ramp(canvas, model, &geometry, &frame, layout);
+    }
+    if (layout->ruler_y >= 0) {
+        draw_fret_ruler(canvas, &geometry, &hand, has_hand, layout->ruler_y);
+    }
+    /* The rail: the chord shape above, the string names beside their own
+     * strings.  Both at a constant x, outside everything that scrolls. */
+    if (layout->neck_y - layout->callout_y >= 40) {
+        draw_chord_box(canvas, &geometry, &frame, &hand, has_hand, left,
+                       layout->callout_y + KPA_FB_CALLOUT_H, KPA_FB_RAIL - 6,
+                       layout->neck_y - layout->callout_y - KPA_FB_CALLOUT_H);
+    }
+    for (api = 0u; api < geometry.strings; ++api) {
+        const char *name = default_labels[api < KPA_STRING_COUNT ? api : 0u];
+        char label[32];
+
+        if (model->tab != NULL && api < KPA_STRING_COUNT &&
+            model->tab->tuning_labels[api][0] != '\0') {
+            name = model->tab->tuning_labels[api];
+        }
+        /* The number a player is told is the player's, never the index. */
+        (void)snprintf(label, sizeof label, "%s %u", name,
+                       (unsigned)player_string_number(api, geometry.strings));
+        draw_text_fit(canvas, left, (int)neck_string_y(&geometry, api) - 8,
+                      label, KPA_UI_DIM, KPA_FB_RAIL - 6);
+    }
+    draw_callout(canvas, model, &frame, &hand, has_hand, when,
+                 left + KPA_FB_RAIL, layout->callout_y,
+                 right - left - KPA_FB_RAIL, geometry.strings);
+    if (frame.report.truncated) {
+        draw_text_right(canvas, right, layout->callout_y + 1,
+                        "more notes than this frame draws", KPA_UI_WARN, 260);
+    }
+    /* Restored to what the caller had, not to the canvas: the notice line
+     * below this is still the caller's to draw. */
+    sr_canvas_set_clip(canvas, clip_x0, clip_y0, clip_x1 - clip_x0,
+                       clip_y1 - clip_y0);
+}
+
 /*
  * The rolling tab lane.
  *
@@ -554,9 +2028,15 @@ static void draw_tab_lane(sr_canvas *canvas, const kpa_ui_model *model,
                    tab != NULL ? (unsigned)tab->max_fret : 0u);
     draw_text_fit(canvas, left, top + 1, line, KPA_UI_DIM, right - left);
 
-    /* Strings and their names, high to low. */
+    /*
+     * Strings and their names, in the order the whole screen is using.
+     * string_display_row maps an api index to a row and a row back to an
+     * api index: both orders it offers are their own inverse, so one
+     * function serves the lane's rows and the neck's alike.
+     */
     for (row = 0u; row < strings; ++row) {
-        const uint32_t api = invert_string_axis(row, strings);
+        const uint32_t api = string_display_row(row, strings,
+                                                model->low_string_on_top);
         const int y = caption + (int)row * row_h + row_h / 2;
         const char *name = default_labels[api < KPA_STRING_COUNT ? api : 0u];
 
@@ -599,6 +2079,7 @@ static void draw_tab_lane(sr_canvas *canvas, const kpa_ui_model *model,
                 uint32_t note_row;
                 int y;
                 uint32_t colour;
+                bool sounding;
                 char fret[8];
 
                 if (at >= tab->position_count) break;
@@ -611,15 +2092,25 @@ static void draw_tab_lane(sr_canvas *canvas, const kpa_ui_model *model,
                 x1 = (float)head_x +
                      (float)((end - model->position) * KPA_UI_LANE_PPS);
                 if (x1 - x0 < 16.0f) x1 = x0 + 16.0f;
-                /* The same inversion the rows above were laid out with:
-                 * api index 0 is the low E and belongs at the bottom. */
-                note_row = invert_string_axis((uint32_t)note->string_index,
-                                              strings);
+                /* The same mapping the rows above were laid out with, so
+                 * the notes cannot end up in one order and the names in
+                 * another - which is the bug the browser shipped. */
+                note_row = string_display_row((uint32_t)note->string_index,
+                                              strings,
+                                              model->low_string_on_top);
                 y = caption + (int)note_row * row_h + row_h / 2;
-                colour = model->position >= item->start &&
-                         model->position <= end ? KPA_UI_ACCENT : KPA_UI_LOOP;
+                /* The string's own colour, the same one the neck draws it
+                 * in, so a note in the lane and the dot it becomes on the
+                 * fretboard are visibly the same string.  Sounding now is
+                 * the opaque one; what has not arrived yet is washed out. */
+                sounding = model->position >= item->start &&
+                           model->position <= end;
+                colour = kpa_string_rgb[note->string_index <
+                                        (int)KPA_STRING_COUNT
+                             ? note->string_index : 0u];
                 sr_fill_rect(canvas, x0, (float)(y - row_h / 2 + 2),
-                             x1 - x0, (float)(row_h - 4), colour, 0.85f);
+                             x1 - x0, (float)(row_h - 4), colour,
+                             sounding ? 0.95f : 0.45f);
                 (void)snprintf(fret, sizeof fret, "%u",
                                (unsigned)note->fret);
                 sr_text(canvas, x0 + 3.0f, (float)(y - 8), fret,
@@ -643,46 +2134,86 @@ static void draw_tab_lane(sr_canvas *canvas, const kpa_ui_model *model,
 static void draw_practice(sr_canvas *canvas, const kpa_ui_model *model,
                           int top, int bottom)
 {
-    const bool notice = model->notice[0] != '\0';
-    /* The notice gets its own line rather than being drawn over the lane. */
-    const int floor_y = notice && bottom - KPA_UI_LINE > top
-        ? bottom - KPA_UI_LINE : bottom;
-    int y = top + 2;
+    kpa_practice_layout layout;
+    const int width = canvas->w - 2 * KPA_UI_MARGIN;
 
-    y = draw_transport(canvas, model, y, floor_y);
-    y = draw_timeline(canvas, model, y, floor_y);
-    y = draw_mixer(canvas, model, y, floor_y);
-    if (model->tab_visible) {
-        draw_tab_lane(canvas, model, y, floor_y);
-    } else if (y + KPA_UI_LINE <= floor_y) {
-        draw_text_fit(canvas, KPA_UI_MARGIN, y + 2,
-                      "tab hidden - t shows it", KPA_UI_DIM,
-                      canvas->w - 2 * KPA_UI_MARGIN);
+    practice_layout(model, top, bottom, width, &layout);
+    if (layout.transport_y < 0) return;
+    (void)draw_transport(canvas, model, layout.transport_y, bottom);
+    if (layout.timeline_y >= 0) {
+        (void)draw_timeline(canvas, model, layout.timeline_y, bottom);
     }
-    if (floor_y < bottom) {
-        draw_text_fit(canvas, KPA_UI_MARGIN, floor_y + 2, model->notice,
-                      KPA_UI_WARN, canvas->w - 2 * KPA_UI_MARGIN);
+    if (layout.mixer_y >= 0) {
+        if (layout.mixer_compact) {
+            draw_mixer_strip(canvas, model, layout.mixer_y,
+                             layout.mixer_y + layout.mixer_h);
+        } else {
+            (void)draw_mixer(canvas, model, layout.mixer_y,
+                             layout.mixer_y + layout.mixer_h);
+        }
+    }
+    if (layout.fb_h > 0) draw_fretboard(canvas, model, &layout);
+    if (layout.lane_h > 0) {
+        draw_tab_lane(canvas, model, layout.lane_y,
+                      layout.lane_y + layout.lane_h);
+    } else if (!model->tab_visible && layout.fb_h == 0 &&
+               layout.mixer_y >= 0 &&
+               layout.mixer_y + layout.mixer_h + KPA_UI_LINE <= bottom) {
+        draw_text_fit(canvas, KPA_UI_MARGIN,
+                      layout.mixer_y + layout.mixer_h + 2,
+                      "tab hidden - t shows it   f shows the fretboard",
+                      KPA_UI_DIM, width);
+    }
+    if (layout.notice_y >= 0) {
+        /* The model's own notice first; a lane that was asked for and did
+         * not fit is the surface's own sentence, and it names the key that
+         * gives the player back whichever of the two they wanted. */
+        if (model->notice[0] != '\0') {
+            draw_text_fit(canvas, KPA_UI_MARGIN, layout.notice_y,
+                          model->notice, KPA_UI_WARN, width);
+        } else if (layout.lane_dropped) {
+            draw_text_fit(canvas, KPA_UI_MARGIN, layout.notice_y,
+                          "no room for both - f hides the neck, t hides the "
+                          "lane", KPA_UI_DIM, width);
+        }
     }
 }
 
 /* ----------------------------------------------------------- help view */
 
 static const char *const help_lines[] = {
-    "space      play / pause",
+    "space      play / pause             c lead-in on / off   C 2s or 4s",
     "left right seek 5s, with shift 30s",
     "[ ]        set loop start / end      backspace clears the loop",
+    "{ }        widen the loop start / end by 0.1s",
+    "a A        jump to the loop start / end, or to the lyric cue either side",
     "1 .. 6     select a stem             m mute      s solo",
     "v          mute or unmute vocals     + - selected stem gain",
     ", .        practice rate down / up   (when a rate engine is present)",
+    "r R        loop speed ramp 70/80/90% / reset the rate to 1.00",
+    "f F        fretboard: neck+ramp, neck, off / look-ahead 1 to 4 seconds",
+    "n o        note labels: fret, name, both / swap which string is on top",
+    "k K        capo up / down            w note-density overview on the bar",
     "l          show or hide lyrics       t show or hide the tab lane",
     "tab        move focus                shift-tab moves it back",
     "escape     leave this view; from the library it leaves the player",
     "q          quit                      ? this page",
     "",
+    "a shifted letter is always the same family as its unshifted one - the",
+    "other direction, or the second axis - so shift can never turn a key",
+    "into something unrelated.",
+    "",
     "lyrics and vocals are separate: hiding the words never mutes the",
     "singer, and muting the singer never hides the words.  the same holds",
     "for the tab lane and the guitar stem."
 };
+
+/*
+ * Where the key table ends and the prose begins.  It was a bare 10 in two
+ * functions, which is a coupling that breaks silently the first time a line
+ * is added above it - and this change added six.
+ */
+#define KPA_UI_HELP_KEY_LINES 16u
 
 static void draw_help(sr_canvas *canvas, const kpa_ui_model *model,
                       int top, int bottom)
@@ -706,7 +2237,8 @@ static void draw_help(sr_canvas *canvas, const kpa_ui_model *model,
     for (index = 0u; index < count; ++index) {
         if (y + KPA_UI_LINE > bottom) break;
         draw_text_fit(canvas, left, y, help_lines[index],
-                      index < 10u ? KPA_UI_TEXT : KPA_UI_DIM, width);
+                      index < KPA_UI_HELP_KEY_LINES ? KPA_UI_TEXT
+                                                    : KPA_UI_DIM, width);
         y += KPA_UI_LINE;
     }
 }
@@ -917,6 +2449,74 @@ static void toggle_mute(kpa_ui_model *model, uint32_t track)
     model->tracks[track].muted = !model->tracks[track].muted;
 }
 
+/*
+ * The look-ahead windows the ramp offers.  Measured on the audited song, a
+ * 2.0 s window carries a median of 17 marks and at most 32, which is
+ * comfortable; 4.0 s reaches about 60 and is visibly busy.  Which of those
+ * a player wants is theirs to decide, which is why this is a key and not a
+ * constant.
+ */
+static float next_ramp_seconds(float current)
+{
+    static const float steps[5] = {1.0f, 1.5f, 2.0f, 3.0f, 4.0f};
+    size_t index;
+
+    for (index = 0u; index < 5u; ++index) {
+        if (current < steps[index] - 0.01f) return steps[index];
+    }
+    return steps[0];
+}
+
+/* Positions the capo makes unplayable: they are on the neck behind it. */
+static uint32_t notes_below_capo(const kpa_tab *tab, uint32_t capo)
+{
+    uint32_t index;
+    uint32_t count = 0u;
+
+    if (tab == NULL || tab->positions == NULL || capo == 0u) return 0u;
+    for (index = 0u; index < tab->position_count; ++index) {
+        const uint32_t fret = tab->positions[index].fret;
+
+        if (fret > 0u && fret < capo) ++count;
+    }
+    return count;
+}
+
+/*
+ * Jump to the cue either side of where the player is.  The step back is
+ * measured from a moment slightly before now, so pressing it twice moves
+ * two lines back rather than landing on the current line for ever.
+ */
+static void jump_to_cue(kpa_ui_model *model, bool forward)
+{
+    const kpa_lyrics *lyrics = model->lyrics;
+    uint32_t index;
+
+    if (lyrics == NULL || lyrics->cues == NULL || lyrics->cue_count == 0u) {
+        set_notice(model, "this project has no lyric cues to jump between");
+        return;
+    }
+    if (forward) {
+        for (index = 0u; index < lyrics->cue_count; ++index) {
+            if (lyrics->cues[index].start > model->position + 0.01) {
+                model->position = clamp_double(lyrics->cues[index].start, 0.0,
+                                               model->duration);
+                return;
+            }
+        }
+        set_notice(model, "no cue after this one");
+        return;
+    }
+    for (index = lyrics->cue_count; index > 0u; --index) {
+        if (lyrics->cues[index - 1u].start < model->position - 0.25) {
+            model->position = clamp_double(lyrics->cues[index - 1u].start,
+                                           0.0, model->duration);
+            return;
+        }
+    }
+    model->position = 0.0;
+}
+
 static int apply_key_practice(kpa_ui_model *model, uint32_t key, bool shift)
 {
     const double step = shift ? KPA_UI_SEEK_STEP_LARGE : KPA_UI_SEEK_STEP;
@@ -931,6 +2531,21 @@ static int apply_key_practice(kpa_ui_model *model, uint32_t key, bool shift)
     }
     switch (key) {
     case ' ':
+        /*
+         * The lead-in is a count-in with no click track: starting playback
+         * rewinds into the song's own audio so the player hears the bar
+         * before the one they are practising.  This build has no metronome
+         * and does not pretend to; it never rewinds past the loop start,
+         * because the engine would wrap straight back out of there.
+         */
+        if (!model->playing && model->lead_in > 0u) {
+            const double floor_at = model->loop_active ? model->loop_start
+                                                       : 0.0;
+
+            model->position = clamp_double(model->position -
+                                           (double)model->lead_in,
+                                           floor_at, model->duration);
+        }
         model->playing = !model->playing;
         break;
     case KITTYKB_KEY_LEFT:
@@ -1001,6 +2616,138 @@ static int apply_key_practice(kpa_ui_model *model, uint32_t key, bool shift)
         break;
     case 't':
         model->tab_visible = !model->tab_visible;
+        /*
+         * As text there are not rows for both pictures of the guitar, so
+         * the request that just arrived wins and says what it took.  Only
+         * on the press that turns this layer ON: cycling the other one is
+         * not a request for this one, and a key that quietly switched
+         * something off every time it was pressed would be worse than the
+         * crowding it is avoiding.
+         */
+        if (model->cell_only && model->tab_visible &&
+            model->fretboard != KPA_FB_OFF) {
+            model->fretboard = KPA_FB_OFF;
+            set_notice(model, "the neck is hidden - as text these rows hold "
+                              "one of the two");
+        }
+        break;
+    /*
+     * From here down, the keys the fretboard added.  One rule holds across
+     * all of them, and it is why the file lowercases A-Z rather than
+     * treating a shifted letter as a key of its own: a shifted letter is
+     * always the SAME FAMILY as its unshifted one - the opposite direction,
+     * or the second axis of the same thing - so shift can never silently
+     * turn a key into something unrelated.  Tab and Shift-Tab already set
+     * that precedent.
+     */
+    case 'f': {
+        const bool was_off = model->fretboard == KPA_FB_OFF;
+
+        if (shift) {
+            model->ramp_seconds = next_ramp_seconds(model_ramp_seconds(model));
+            break;
+        }
+        model->fretboard = (kpa_fretboard_mode)((model->fretboard + 1) % 3);
+        /* See `t` above: only the press that turns the neck back on takes
+         * the lane's rows, never the ones that cycle the ramp off. */
+        if (model->cell_only && was_off && model->fretboard != KPA_FB_OFF &&
+            model->tab_visible) {
+            model->tab_visible = false;
+            set_notice(model, "the lane is hidden - as text these rows hold "
+                              "one of the two");
+        }
+        break;
+    }
+    case 'n':
+        model->note_label = (kpa_note_label)((model->note_label + 1) % 3);
+        break;
+    case 'o':
+        /* One key, both pictures: the neck, the lane and the cell-only tab
+         * all read the same preference. */
+        model->low_string_on_top = !model->low_string_on_top;
+        break;
+    case 'k': {
+        uint32_t behind;
+
+        if (shift) {
+            model->capo = model->capo == 0u ? 7u
+                                            : (uint8_t)(model->capo - 1u);
+        } else {
+            model->capo = model->capo >= 7u ? 0u
+                                            : (uint8_t)(model->capo + 1u);
+        }
+        behind = notes_below_capo(model->tab, model->capo);
+        if (behind > 0u) {
+            char line[KPA_TEXT_CAPACITY];
+
+            (void)snprintf(line, sizeof line,
+                           "capo %u - %u note%s in this part sit behind it",
+                           (unsigned)model->capo, (unsigned)behind,
+                           behind == 1u ? "" : "s");
+            set_notice(model, line);
+        }
+        break;
+    }
+    case 'c':
+        if (shift) {
+            model->lead_in = model->lead_in == 4u ? 2u : 4u;
+            break;
+        }
+        model->lead_in = model->lead_in > 0u ? 0u : 2u;
+        break;
+    case 'r':
+        if (!model->rate_available) {
+            /* The existing path: it says why and changes nothing. */
+            adjust_rate(model, 0.0);
+            break;
+        }
+        if (shift) {
+            model->speed_ramp = 0u;
+            model->rate = 1.0;
+            break;
+        }
+        /*
+         * The ramp starts a loop slow and adds five points of rate every
+         * time it comes round, up to full speed.  The wrap is detected by
+         * the surface's own refresh, not here: a key table that watched the
+         * clock would stop being a pure function of the model.
+         */
+        if (model->speed_ramp == 0u) {
+            model->speed_ramp = 70u;
+        } else if (model->speed_ramp < 90u) {
+            model->speed_ramp = (uint8_t)(model->speed_ramp + 10u);
+        } else {
+            model->speed_ramp = 0u;
+        }
+        model->rate = model->speed_ramp > 0u
+            ? (double)model->speed_ramp / 100.0 : 1.0;
+        if (!model->loop_active) {
+            set_notice(model, "the speed ramp steps up each time a loop comes "
+                              "round - set one with [ and ]");
+        }
+        break;
+    case 'a':
+        if (model->loop_active) {
+            model->position = clamp_double(shift ? model->loop_end
+                                                 : model->loop_start,
+                                           0.0, model->duration);
+            break;
+        }
+        jump_to_cue(model, shift);
+        break;
+    case '{':
+        model->loop_start = clamp_double(model->loop_start - 0.1, 0.0,
+                                         model->duration);
+        model->loop_active = model->loop_end > model->loop_start;
+        break;
+    case '}':
+        model->loop_end = clamp_double(model->loop_end + 0.1, 0.0,
+                                       model->duration);
+        model->loop_active = model->loop_end > model->loop_start;
+        break;
+    case 'w':
+        model->overview = model->overview == KPA_OVERVIEW_DENSITY
+            ? KPA_OVERVIEW_PLAIN : KPA_OVERVIEW_DENSITY;
         break;
     case '+': case '=':
         if (track != NULL) {
@@ -1164,6 +2911,17 @@ typedef struct kpa_ui_runtime {
     bool shown_valid;
     int seek_hold;      /* frames the display holds a requested position */
     bool signals_installed;
+
+    /*
+     * Derived state that is history rather than model: the chord label's
+     * latch and the loop's rate ramp.  Both are kept here and not in the
+     * model, because everything in the model has to be drawable from itself
+     * alone - that is what makes kpa_ui_compose a pure function of it.
+     */
+    char chord_candidate[24];
+    double candidate_since;
+    double last_position;
+    bool last_position_valid;
 } kpa_ui_runtime;
 
 /*
@@ -1621,14 +3379,98 @@ static void write_lyric_row(kpa_ui_runtime *rt, const kpa_ui_grid *grid,
                   text + sung, length - sung, KPA_UI_TEXT);
 }
 
+/*
+ * What the band says about where its times came from.
+ *
+ * The estimated case is the one a player must see.  Spans invented by
+ * spreading a line across the song highlight word by word exactly as
+ * confidently as measured ones do, so nothing on the screen distinguishes a
+ * measurement from a guess unless it is said in words.  The other kinds are
+ * captioned too, which is what leaves no answer from here meaning one thing
+ * only: a document written before the field existed, about which this surface
+ * has been told nothing.
+ */
+bool kpa_ui_internal_lyrics_caption(const kpa_lyrics *lyrics, char *out,
+                                    size_t size, uint32_t *rgb)
+{
+    const kpa_lyrics_alignment *report;
+    double percent;
+
+    if (out == NULL || size == 0u) return false;
+    out[0] = '\0';
+    if (rgb != NULL) *rgb = KPA_UI_DIM;
+    if (lyrics == NULL) return false;
+    report = &lyrics->alignment;
+    switch (lyrics->timing) {
+    case KPA_TIMING_ESTIMATED:
+        if (rgb != NULL) *rgb = KPA_UI_WARN;
+        (void)snprintf(out, size,
+                       "timing estimated - spread across the song, not "
+                       "measured");
+        return true;
+    case KPA_TIMING_MEASURED:
+        /* Measured with no report is all this can honestly say; a percentage
+         * the document did not carry is not one to put on the screen. */
+        if (!report->present) {
+            (void)snprintf(out, size, "timing measured");
+            return true;
+        }
+        /*
+         * Floored, not rounded: 99.6% of the words is not all of them, and a
+         * caption reading "100% matched, 2 filled in" contradicts itself.
+         * The hair added first is what keeps a fraction whose product landed
+         * a shade under its own hundredth - 0.29 * 100.0 is
+         * 28.999999999999996 - from reading one percent low; a fraction has
+         * to be within 1e-11 of 1.0 before that hair can carry it to 100.
+         *
+         * kpa_project.c refuses a fraction outside 0..1, so the clamp is not
+         * for a document: it is for a model some other caller assembled by
+         * hand, where the cast below would otherwise be undefined.
+         */
+        percent = report->matched_fraction * 100.0 + 1e-9;
+        if (!(percent >= 0.0)) percent = 0.0;
+        if (percent > 100.0) percent = 100.0;
+        if (!report->usable && rgb != NULL) *rgb = KPA_UI_WARN;
+        (void)snprintf(out, size,
+                       "timing measured - %u%% of words matched, %u filled "
+                       "in%s", (unsigned)percent,
+                       (unsigned)report->interpolated_words,
+                       report->usable ? "" : " (the aligner called it poor)");
+        return true;
+    case KPA_TIMING_AUTHORED:
+        (void)snprintf(out, size,
+                       "timing authored - the source carried these stamps");
+        return true;
+    case KPA_TIMING_UNKNOWN:
+    default:
+        return false;
+    }
+}
+
 static void write_lyric_band(kpa_ui_runtime *rt, const kpa_ui_grid *grid,
                              int first, int count)
 {
     char line[KPA_UI_LINE_CAPACITY];
     const kpa_lyrics *lyrics = rt->model.lyrics;
-    const int centre = count / 2;
+    uint32_t caption_rgb = KPA_UI_DIM;
+    int centre;
     int offset;
 
+    /*
+     * The caption takes the band's top row, which carries the line furthest
+     * behind the singer and is the cheapest row in the band to give up, and
+     * only when there is a row to give: a band one row tall is the line being
+     * sung and nothing else, and covering that to explain it would be
+     * perverse.
+     */
+    if (count > 1 &&
+        kpa_ui_internal_lyrics_caption(lyrics, line, sizeof line,
+                                       &caption_rgb)) {
+        write_row(rt, grid, first, line, caption_rgb);
+        ++first;
+        --count;
+    }
+    centre = count / 2;
     for (offset = 0; offset < count; ++offset) {
         const int32_t cue = rt->model.active_cue + (int32_t)(offset - centre);
         size_t sung = 0u;
@@ -1713,7 +3555,8 @@ static void cell_tab_line(const kpa_ui_model *model, uint32_t display_row,
         "E", "A", "D", "G", "B", "e"
     };
     const kpa_tab *tab = model->tab;
-    const uint32_t api = invert_string_axis(display_row, strings);
+    const uint32_t api = string_display_row(display_row, strings,
+                                            model->low_string_on_top);
     const char *name = default_labels[api < KPA_STRING_COUNT ? api : 0u];
     const double per_column = 4.0;         /* columns per second */
     int lane;
@@ -1774,6 +3617,244 @@ static void cell_tab_line(const kpa_ui_model *model, uint32_t display_row,
     }
 }
 
+/* The mixer in one row: an initial, a short bar and the flags.  Written
+ * before the neck is given up, because five stems as one line still say what
+ * is loud and what is muted. */
+static void cell_mixer_strip(const kpa_ui_model *model, char *out, size_t size)
+{
+    size_t used = 0u;
+    uint32_t index;
+
+    out[0] = '\0';
+    for (index = 0u; index < model->track_count && index < KPA_MAX_TRACKS;
+         ++index) {
+        const kpa_ui_track *track = &model->tracks[index];
+        char bar[8];
+        int filled = (int)(clamp_float(track->gain / KPA_UI_GAIN_MAX, 0.0f,
+                                       1.0f) * 4.0f + 0.5f);
+        int cell;
+        int written;
+
+        for (cell = 0; cell < filled && cell < 4; ++cell) bar[cell] = '=';
+        bar[cell] = '\0';
+        written = snprintf(out + used, size - used, "%s%c%s%s%s",
+                           index > 0u ? " " : "",
+                           track->label[0] != '\0' ? track->label[0] : '?',
+                           bar, track->muted ? "M" : "",
+                           track->soloed ? "S" : "");
+        if (written < 0 || (size_t)written >= size - used) break;
+        used += (size_t)written;
+    }
+}
+
+/*
+ * The neck as terminal cells.
+ *
+ * A cell grid has equal-width columns, so a proportionally spaced fretboard
+ * cannot be drawn in one: the frets would come out evenly spaced, which is
+ * the single thing that makes a drawn fretboard look fake.  This therefore
+ * does not draw a neck.  It draws a WINDOW at the hand - a few frets side by
+ * side with their numbers underneath - which is honest about being a grid,
+ * and it is what the pixel surface's position box is showing anyway.
+ *
+ * ASCII only.  The cell layer is UTF-8 and would carry box drawing happily,
+ * but those characters are ambiguous-width, and a terminal that renders them
+ * double slides the whole grid sideways.  The lyrics stay UTF-8; a fret
+ * diagram has nothing to gain from it.
+ */
+#define KPA_UI_CELL_PREFIX 4
+#define KPA_UI_CELL_FRET 5
+#define KPA_UI_CELL_FRETS_MIN 4
+#define KPA_UI_CELL_FRETS_MAX 8
+/* Rows the lyric band is given before anything else is laid out, when there
+ * are lyrics to show: the caption and three cues. */
+#define KPA_UI_CELL_LYRIC_ROWS 4
+
+static int cell_neck_rows(uint32_t strings)
+{
+    /* A blank, the callout, one row per string and the fret numbers. */
+    return 1 + 1 + (int)strings + 1;
+}
+
+static int write_cell_neck(kpa_ui_runtime *rt, const kpa_ui_grid *grid,
+                           int row, int last)
+{
+    static const char *const default_labels[KPA_STRING_COUNT] = {
+        "E", "A", "D", "G", "B", "e"
+    };
+    const kpa_ui_model *model = &rt->model;
+    const uint32_t strings = fb_string_count(model->tab);
+    kpa_fb_frame frame;
+    kpa_fret_hand hand;
+    char line[KPA_UI_LINE_CAPACITY];
+    char chord[32];
+    bool named = false;
+    bool has_hand;
+    uint32_t first;
+    uint32_t display;
+    int frets;
+    int lane;
+    int index;
+
+    frets = (grid->columns - KPA_UI_CELL_PREFIX - 1) / KPA_UI_CELL_FRET;
+    if (frets < KPA_UI_CELL_FRETS_MIN) return row;
+    if (frets > KPA_UI_CELL_FRETS_MAX) frets = KPA_UI_CELL_FRETS_MAX;
+    if (row + cell_neck_rows(strings) - 1 > last) return row;
+    lane = 1 + frets * KPA_UI_CELL_FRET;
+    if ((size_t)(KPA_UI_CELL_PREFIX + lane) >= sizeof line) return row;
+
+    (void)fb_collect(&frame, model->tab, model->position,
+                     model_ramp_seconds(model), strings);
+    (void)memset(&hand, 0, sizeof hand);
+    has_hand = fb_hand(model->tab, model->position, &hand);
+    first = has_hand ? (uint32_t)hand.low : 1u;
+
+    write_row(rt, grid, row++, "", KPA_UI_DIM);
+
+    /* The callout, in the same three fields the pixel surface uses. */
+    {
+        int32_t pitches[KPA_FRET_MAX_PITCHES];
+        const uint32_t count = fb_ring_pitches(&frame, strings, pitches);
+        char tail[96];
+
+        if (model->chord[0] != '\0') {
+            (void)snprintf(chord, sizeof chord, "%s", model->chord);
+            named = model->chord_kind != 0u;
+        } else {
+            kpa_ui_internal_chord_label(pitches, count, chord, sizeof chord,
+                                        &named);
+        }
+        tail[0] = '\0';
+        if (has_hand) {
+            const kpa_fb_move move = fb_next_move(model->tab, model->position,
+                                                  strings, &hand);
+
+            if (move.found) {
+                (void)snprintf(tail, sizeof tail, "   next: pos %u%s%s in %.1fs",
+                               (unsigned)move.anchor,
+                               move.chord[0] != '\0' ? ", " : "  ",
+                               move.chord, move.when - model->position);
+            }
+        }
+        {
+            char where[16];
+
+            if (has_hand) {
+                (void)snprintf(where, sizeof where, "pos %u",
+                               (unsigned)hand.low);
+            } else {
+                (void)snprintf(where, sizeof where, "open");
+            }
+            (void)snprintf(line, sizeof line, "%-8s%-10s%s", where, chord,
+                           tail);
+        }
+        write_row(rt, grid, row++, line, named ? KPA_UI_TEXT : KPA_UI_DIM);
+    }
+
+    for (display = 0u; display < strings; ++display) {
+        const uint32_t api = string_display_row(display, strings,
+                                                model->low_string_on_top);
+        const kpa_fret_note *sounding = api < KPA_STRING_COUNT
+            ? frame.ring[api] : NULL;
+        const char *name = default_labels[api < KPA_STRING_COUNT ? api : 0u];
+        char cells[KPA_UI_LINE_CAPACITY];
+        int at;
+
+        if (model->tab != NULL && api < KPA_STRING_COUNT &&
+            model->tab->tuning_labels[api][0] != '\0') {
+            name = model->tab->tuning_labels[api];
+        }
+        cells[0] = '|';
+        for (at = 0; at < frets; ++at) {
+            const int cell = 1 + at * KPA_UI_CELL_FRET;
+
+            cells[cell] = '-';
+            cells[cell + 1] = '-';
+            cells[cell + 2] = '-';
+            cells[cell + 3] = '-';
+            cells[cell + 4] = '|';
+        }
+        cells[lane] = '\0';
+
+        /* What is arriving, first, so a note that is sounding overwrites it
+         * rather than the other way round. */
+        for (index = 0; index < (int)frame.report.count; ++index) {
+            const kpa_fret_note *note = &frame.notes[index];
+            int cell;
+
+            if (!fb_note_arriving(note, frame.when)) continue;
+            if (note->string_index < 0 ||
+                (uint32_t)note->string_index != api) {
+                continue;
+            }
+            if (note->fret < (int32_t)first ||
+                note->fret >= (int32_t)first + frets) {
+                continue;
+            }
+            cell = 1 + (note->fret - (int32_t)first) * KPA_UI_CELL_FRET + 2;
+            if (cells[cell] == '-') cells[cell] = 'o';
+        }
+        if (sounding != NULL) {
+            const int fret = sounding->fret;
+
+            if (fret == 0) {
+                cells[0] = '0';
+                for (at = 1; at < lane; ++at) {
+                    if (cells[at] == '-' || cells[at] == 'o') cells[at] = '=';
+                }
+            } else if (fret >= (int)first && fret < (int)first + frets) {
+                const int cell = 1 + (fret - (int)first) * KPA_UI_CELL_FRET;
+                /* Wide enough for any int the compiler can prove reaches
+                 * here, not just for the two digits a fret really has. */
+                char digits[16];
+
+                for (at = cell; at < lane; ++at) {
+                    if (cells[at] == '-' || cells[at] == 'o') cells[at] = '=';
+                }
+                if (model->capo > 0u && fret < (int)model->capo) {
+                    /* Behind the capo: unplayable from here, and said so
+                     * rather than moved to a fret the artifact never had. */
+                    cells[cell + 1] = 'x';
+                    cells[cell + 2] = '=';
+                } else {
+                    (void)snprintf(digits, sizeof digits, "%d", fret);
+                    cells[cell + 1] = digits[0];
+                    if (digits[1] != '\0') cells[cell + 2] = digits[1];
+                }
+            }
+        }
+        /* Four columns of prefix, then the nut: "e 1 |----|...".  The
+         * name is truncated to two so a long tuning label cannot shift the
+         * grid out from under the fret numbers below it. */
+        (void)snprintf(line, sizeof line, "%-2.2s%u %s", name,
+                       (unsigned)player_string_number(api, strings), cells);
+        write_row(rt, grid, row++, line,
+                  sounding != NULL ? KPA_UI_TEXT : KPA_UI_DIM);
+    }
+
+    /* The fret numbers, centred under their own cells. */
+    for (index = 0; index < KPA_UI_CELL_PREFIX + lane; ++index) {
+        line[index] = ' ';
+    }
+    line[KPA_UI_CELL_PREFIX + lane] = '\0';
+    for (index = 0; index < frets; ++index) {
+        char number[8];
+        const int width = (int)snprintf(number, sizeof number, "%u",
+                                        (unsigned)(first + (uint32_t)index));
+        /* The column the row puts that fret's first digit in, so a number
+         * here sits under the note it names rather than near it. */
+        const int centre = KPA_UI_CELL_PREFIX + 2 +
+                           index * KPA_UI_CELL_FRET;
+        int digit;
+
+        for (digit = 0; digit < width; ++digit) {
+            line[centre + digit] = number[digit];
+        }
+    }
+    write_row(rt, grid, row++, line, KPA_UI_DIM);
+    return row;
+}
+
 /*
  * The library as text.  Better than the pixel list, in fact: a title is
  * whatever the song is written in, and these rows are UTF-8 cells rather
@@ -1824,7 +3905,7 @@ static int write_cell_help(kpa_ui_runtime *rt, const kpa_ui_grid *grid,
 
     for (index = 0u; index < count && row <= last; ++index) {
         write_row(rt, grid, row++, help_lines[index],
-                  index < 10u ? KPA_UI_TEXT : KPA_UI_DIM);
+                  index < KPA_UI_HELP_KEY_LINES ? KPA_UI_TEXT : KPA_UI_DIM);
     }
     return row;
 }
@@ -1843,43 +3924,121 @@ static int write_cell_body(kpa_ui_runtime *rt, const kpa_ui_grid *grid,
     if (model->view == KPA_VIEW_HELP) {
         return write_cell_help(rt, grid, row, last);
     }
-    cell_transport_line(model, line, sizeof line);
-    write_row(rt, grid, row++, line, KPA_UI_TEXT);
-    if (row <= last) write_row(rt, grid, row++, "", KPA_UI_DIM);
-    for (index = 0u; index < model->track_count && row <= last; ++index) {
-        cell_mixer_line(model, index, line, sizeof line);
-        write_row(rt, grid, row++, line,
-                  index == model->selected_track ? KPA_UI_TEXT : KPA_UI_DIM);
-    }
-    if (model->tab_visible) {
-        uint32_t strings = KPA_STRING_COUNT;
-        uint32_t display;
+    {
+        const uint32_t strings = fb_string_count(model->tab);
+        const bool wants_neck = model->fretboard != KPA_FB_OFF &&
+                                model->tab != NULL;
+        const bool wants_lyrics = model->lyrics_visible &&
+                                  model->lyrics != NULL;
+        const int neck_rows = wants_neck ? cell_neck_rows(strings) : 0;
+        const int lane_rows = model->tab_visible ? 1 + (int)strings : 0;
+        /*
+         * The lyric band is taken off the top of the budget rather than
+         * given whatever is left over.  With no pixel layer this is the
+         * surface, and a player who can see the words is the reason it
+         * degrades to text at all instead of refusing to start.
+         */
+        int lyric_rows = 0;
+        int body_last;
+        int available;
 
-        if (model->tab != NULL && model->tab->string_count > 0u &&
-            model->tab->string_count <= KPA_STRING_COUNT) {
-            strings = model->tab->string_count;
+        if (wants_lyrics) {
+            /* Four rows: the provenance caption and the line being sung
+             * with one either side of it.  Never at the cost of the
+             * transport and the mixer having nowhere to go. */
+            lyric_rows = last - row + 1 - 6;
+            if (lyric_rows > KPA_UI_CELL_LYRIC_ROWS) {
+                lyric_rows = KPA_UI_CELL_LYRIC_ROWS;
+            }
+            if (lyric_rows < 0) lyric_rows = 0;
         }
-        if (row <= last) write_row(rt, grid, row++, "", KPA_UI_DIM);
-        for (display = 0u; display < strings && row <= last; ++display) {
-            cell_tab_line(model, display, strings, grid->columns, line,
-                          sizeof line);
-            write_row(rt, grid, row++, line, KPA_UI_DIM);
-        }
-    }
-    if (model->lyrics_visible && model->lyrics != NULL && row < last) {
-        int available = last - row;
+        body_last = last - (lyric_rows > 0 ? lyric_rows + 1 : 0);
 
-        if (available > KPA_UI_MAX_LYRIC_ROWS) {
-            available = KPA_UI_MAX_LYRIC_ROWS;
+        cell_transport_line(model, line, sizeof line);
+        write_row(rt, grid, row++, line, KPA_UI_TEXT);
+        if (row <= body_last) write_row(rt, grid, row++, "", KPA_UI_DIM);
+
+        /*
+         * What gets given up, in order: the tab lane, then the mixer's
+         * rows - five stems as one line still say what is loud and what is
+         * muted - and only then the neck.  An 80x24 terminal has room for
+         * one of the two pictures of the guitar and not both, which is why
+         * `f` and `t` say what they took when a player asks for the other.
+         */
+        {
+            const int room = body_last - row + 1;
+            const bool crowded = wants_neck &&
+                                 room - (int)model->track_count < neck_rows;
+
+            if (crowded && model->track_count > 0u && row <= body_last) {
+                cell_mixer_strip(model, line, sizeof line);
+                write_row(rt, grid, row++, line, KPA_UI_DIM);
+            } else {
+                for (index = 0u; index < model->track_count &&
+                                 row <= body_last; ++index) {
+                    cell_mixer_line(model, index, line, sizeof line);
+                    write_row(rt, grid, row++, line,
+                              index == model->selected_track ? KPA_UI_TEXT
+                                                             : KPA_UI_DIM);
+                }
+            }
         }
-        write_row(rt, grid, row++, "", KPA_UI_DIM);
-        write_lyric_band(rt, grid, row, available);
-        row += available;
+        if (wants_neck) row = write_cell_neck(rt, grid, row, body_last);
+        /*
+         * The lane is all six strings or none of them: five rows of a
+         * six-string tab is not a tab, it is a tab with the low E missing
+         * and nothing saying so.
+         */
+        if (model->tab_visible && row + lane_rows - 1 <= body_last) {
+            uint32_t display;
+
+            write_row(rt, grid, row++, "", KPA_UI_DIM);
+            for (display = 0u; display < strings; ++display) {
+                cell_tab_line(model, display, strings, grid->columns, line,
+                              sizeof line);
+                write_row(rt, grid, row++, line, KPA_UI_DIM);
+            }
+        }
+        if (lyric_rows > 0) {
+            available = lyric_rows;
+            /* Anything the body did not use is cleared, so the band sits at
+             * the bottom where it always is rather than sliding up when the
+             * lane is dropped. */
+            while (row < last - available) {
+                kpa_cells_clear_row(rt->cells, grid->origin_row + row,
+                                    grid->columns);
+                ++row;
+            }
+            write_row(rt, grid, row++, "", KPA_UI_DIM);
+            write_lyric_band(rt, grid, row, available);
+            row += available;
+        }
     }
     return row;
 }
 
 /* --------------------------------------------------------------- frames */
+
+/*
+ * The status row names the keys of the view it is under, not every key the
+ * player has.  One row could hold the whole table once; it cannot now, and a
+ * row that lists half a table without saying so is worse than one that lists
+ * the half you are looking at.  `?` still has all of them.
+ */
+static const char *status_line(const kpa_ui_model *model)
+{
+    switch (model->view) {
+    case KPA_VIEW_LIBRARY:
+        return "up down select   enter open   tab focus   ? help   q quit";
+    case KPA_VIEW_HELP:
+        return "? or escape leaves this page   q quit";
+    case KPA_VIEW_PRACTICE:
+    default:
+        return "space play   arrows seek   [ ] loop   a A jump   f neck   "
+               "F ahead   o strings   n labels   k capo   w density   "
+               "m mute   s solo   l lyrics   t tab   ? help   q quit";
+    }
+}
 
 static void draw_overlay(kpa_ui_runtime *rt)
 {
@@ -1944,10 +4103,8 @@ static void draw_overlay(kpa_ui_runtime *rt)
             write_row(rt, &grid, layout.status_row, model->notice,
                       KPA_UI_WARN);
         } else {
-            write_row(rt, &grid, layout.status_row,
-                      "space play   arrows seek   [ ] loop   1-6 stem   "
-                      "m mute   s solo   v vocals   l lyrics   t tab   "
-                      "? help   q quit", KPA_UI_DIM);
+            write_row(rt, &grid, layout.status_row, status_line(model),
+                      KPA_UI_DIM);
         }
     }
     kpa_cells_end(rt->cells);
@@ -2040,6 +4197,116 @@ static void refresh_model(kpa_ui_runtime *rt)
     }
 }
 
+/*
+ * The chord label's latch.
+ *
+ * Named from what is ringing every frame, the label changes every 0.37 s on
+ * the audited song, which is a flicker rather than a reading.  Holding the
+ * last name through the passages the shared namer declines, and making a new
+ * name wait until it has been true for a quarter of a second, takes that to
+ * 1.23 s.  The lag it costs is 0.25 s - one median-length event - and it
+ * buys a line a player can actually read.
+ *
+ * Silence clears it outright.  A chord symbol left standing over a rest is
+ * not a held reading, it is a stale one.
+ */
+static void refresh_chord(kpa_ui_runtime *rt)
+{
+    kpa_ui_model *model = &rt->model;
+    kpa_fb_frame frame;
+    int32_t pitches[KPA_FRET_MAX_PITCHES];
+    char label[sizeof model->chord];
+    const uint32_t strings = fb_string_count(model->tab);
+    uint32_t count;
+    bool named = false;
+
+    if (model->tab == NULL) {
+        model->chord[0] = '\0';
+        model->chord_kind = 0u;
+        return;
+    }
+    (void)fb_collect(&frame, model->tab, model->position, 0.0f, strings);
+    count = fb_ring_pitches(&frame, strings, pitches);
+    if (count == 0u) {
+        model->chord[0] = '\0';
+        model->chord_kind = 0u;
+        rt->chord_candidate[0] = '\0';
+        return;
+    }
+    kpa_ui_internal_chord_label(pitches, count, label, sizeof label, &named);
+    if (!named) {
+        /* Hold the last real chord; show the notes only when there has
+         * never been one to hold. */
+        if (model->chord[0] == '\0') {
+            (void)snprintf(model->chord, sizeof model->chord, "%s", label);
+            model->chord_kind = 0u;
+        }
+        return;
+    }
+    if (strcmp(label, rt->chord_candidate) != 0) {
+        (void)snprintf(rt->chord_candidate, sizeof rt->chord_candidate, "%s",
+                       label);
+        rt->candidate_since = model->position;
+        return;
+    }
+    /* A seek backwards is not a candidate that has been true for a long
+     * time; the timer restarts from wherever the player landed. */
+    if (model->position < rt->candidate_since) {
+        rt->candidate_since = model->position;
+        return;
+    }
+    if (model->position - rt->candidate_since < KPA_FB_CHORD_HOLD) return;
+    if (strcmp(label, model->chord) != 0) {
+        (void)snprintf(model->chord, sizeof model->chord, "%s", label);
+        model->chord_kind = 1u;
+    }
+}
+
+/*
+ * The loop's speed ramp: every time the loop comes round, five points
+ * faster, up to full speed.  The wrap is what a loop looks like from here -
+ * the audible clock jumping back to near the loop start - and the rate is
+ * changed through the engine, which is still the thing that decides whether
+ * a rate is available at all.
+ */
+static void refresh_speed_ramp(kpa_ui_runtime *rt)
+{
+    kpa_ui_model *model = &rt->model;
+    double next;
+
+    if (model->speed_ramp == 0u || rt->audio == NULL) return;
+    if (!model->loop_active || !model->rate_available) return;
+    if (!rt->last_position_valid) return;
+    if (!(model->position < rt->last_position - 0.25)) return;
+    if (model->position > model->loop_start + 0.5) return;
+    next = model->rate + 0.05;
+    if (next > 1.0) next = 1.0;
+    if (next <= model->rate) return;
+    if (kpa_audio_set_rate(rt->audio, next) == KPA_AUDIO_OK) {
+        model->rate = next;
+    } else {
+        /* Believe the engine: the ramp stops rather than showing a rate
+         * the audio never took. */
+        model->rate_available = false;
+        model->speed_ramp = 0u;
+        set_notice(model, "this build has no pitch-preserving rate engine");
+    }
+}
+
+/*
+ * Everything the model carries that is a function of history rather than of
+ * this instant.  Called unconditionally after refresh_model, which returns
+ * early when there is no audio session - the chord latch still has to run on
+ * a surface that is silent.
+ */
+static void refresh_derived(kpa_ui_runtime *rt)
+{
+    refresh_chord(rt);
+    refresh_speed_ramp(rt);
+    rt->last_position = rt->model.position;
+    rt->last_position_valid = true;
+}
+
 static int runtime_loop(kpa_ui_runtime *rt)
 {
     bool running = true;
@@ -2080,6 +4347,7 @@ static int runtime_loop(kpa_ui_runtime *rt)
             set_notice(&rt->model, "graphics stopped; drawing as text");
         }
         refresh_model(rt);
+        refresh_derived(rt);
         draw_frame(rt, force);
 
         descriptor.fd = STDIN_FILENO;

@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from .errors import ProviderFailedError
+from .errors import InvalidInputError, ProviderFailedError
 from .util import private_write, public_error
 
 
@@ -127,6 +127,25 @@ def usable_seconds(value: float) -> float | None:
     except OverflowError:
         return None
     return seconds if math.isfinite(seconds) and seconds > 0 else None
+
+
+def require_seconds(value: float, description: str) -> None:
+    """``usable_seconds`` as a precondition: refuse the value rather than report it.
+
+    Here rather than at the two entry points that need it, for the reason the
+    predicate itself is here. A ``timeout`` reaches ``run_command``, which rejects an
+    unusable one with a bare ``ValueError``; a ``max_duration`` reaches nothing but a
+    comparison, and a NaN would not raise there at all -- it would compare False and
+    switch the duration gate off in silence. Both entry points owe the user the same
+    sentence for the same value, and they were writing it out separately: two identical
+    two-line wrappers around this predicate, in ``source`` and in ``providers/youtube``,
+    with identical messages, is a message that can drift while the predicate cannot.
+
+    ``InvalidInputError`` rather than this module's own ``ProviderFailedError``: an
+    unusable bound is a bad argument, and it is refused before any process exists.
+    """
+    if usable_seconds(value) is None:
+        raise InvalidInputError(f"{description} must be a positive, finite number of seconds")
 
 
 def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
@@ -262,7 +281,8 @@ def run_command(
     timeout conversion, and an ``int`` past the float ceiling does so from the deadline
     arithmetic). ``ValueError`` is not a ``PlayalongError``, so a caller that forwards a
     caller-supplied value into either keyword has to validate it first;
-    ``providers/youtube.py`` does exactly that, with ``usable_seconds``.
+    ``providers/youtube.py`` and ``source.acquire`` do exactly that, with
+    ``require_seconds``.
 
     Every abnormal exit from the window in which an unreaped child exists -- timeout,
     output bound, in-process exception, one interrupt or several -- tears the provider's

@@ -89,6 +89,39 @@ typedef struct kpa_cue {
     uint32_t word_count;
 } kpa_cue;
 
+/*
+ * Where a cue's times came from.  A span that was measured against the audio
+ * and one that was spread evenly across the duration highlight a line with
+ * exactly the same confidence, and they have earned very different amounts of
+ * it, so the document says which it is rather than leaving a consumer to take
+ * a provider string apart looking for a suffix.
+ *
+ * KPA_TIMING_UNKNOWN is a document written before the field existed.  It is
+ * not a quieter word for estimated: it is the absence of a claim, and a
+ * surface that drew it as a guess would be inventing one.
+ */
+typedef enum kpa_lyrics_timing {
+    KPA_TIMING_UNKNOWN = 0,
+    KPA_TIMING_AUTHORED = 1,    /* the source carried its own stamps */
+    KPA_TIMING_MEASURED = 2,    /* alignment placed the words on the audio */
+    KPA_TIMING_ESTIMATED = 3    /* spans invented by spreading the text out */
+} kpa_lyrics_timing;
+
+/*
+ * What the alignment said about itself, and only ever for a measured
+ * document: numbers describing a measurement that did not happen would be
+ * worse than no numbers at all.  `present` is what separates a document that
+ * reported nothing from one that reported zeros, and zeros here are a perfect
+ * alignment rather than a missing one.
+ */
+typedef struct kpa_lyrics_alignment {
+    bool present;
+    double matched_fraction;      /* 0..1; outside it the load is refused */
+    uint32_t interpolated_words;  /* placed between matches, not measured */
+    double mean_displacement;     /* seconds, finite and not negative */
+    bool usable;                  /* the producer's own verdict on the above */
+} kpa_lyrics_alignment;
+
 typedef struct kpa_lyrics {
     kpa_cue *cues;
     uint32_t cue_count;
@@ -99,6 +132,11 @@ typedef struct kpa_lyrics {
     size_t text_size;
     char language[KPA_ID_CAPACITY];
     char source[KPA_ID_CAPACITY];
+    /* Added to the schema after the first documents were written, so absence
+     * is ordinary: it reads as unknown timing and no report, which is what
+     * every document from before it is. */
+    kpa_lyrics_timing timing;
+    kpa_lyrics_alignment alignment;
 } kpa_lyrics;
 
 typedef struct kpa_tab_position {

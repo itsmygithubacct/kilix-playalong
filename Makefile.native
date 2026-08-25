@@ -63,6 +63,7 @@ NATIVE_SOURCES := \
 	src/native/kpa_json.c \
 	src/native/kpa_cells.c \
 	src/native/kpa_project.c \
+	src/native/kpa_fret.c \
 	src/native/kpa_audio.c \
 	src/native/kpa_ui.c
 NATIVE_OBJECTS := $(patsubst src/native/%.c,$(NATIVE_DIR)/%.o,$(NATIVE_SOURCES))

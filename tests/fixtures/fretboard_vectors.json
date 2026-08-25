@@ -1,0 +1,2872 @@
+{
+  "schema": "kilix.playalong.fretboard-vectors/v1",
+  "contract": "docs/FRETBOARD.md",
+  "purpose": "Values every implementation of the fretboard surface must reproduce. Transcription cases are read from a real 937-event guitar-tab.json; synthetic cases cover branches that song does not exercise.",
+  "reference_song": {
+    "schema": "kilix.playalong.tab/v1",
+    "events": 937,
+    "events_with_simultaneous_notes": 528,
+    "fret_range": [
+      0,
+      19
+    ],
+    "tuning_midi": [
+      40,
+      45,
+      50,
+      55,
+      59,
+      64
+    ],
+    "tuning_labels": [
+      "E",
+      "A",
+      "D",
+      "G",
+      "B",
+      "e"
+    ],
+    "max_fret": 20,
+    "last_event_end": 215.283
+  },
+  "geometry": {
+    "formula": "d(n) = 1 - 2**(-n/12)",
+    "cell_formula": "cell(n) = (d(n-1) + d(n)) / 2   for n >= 1",
+    "display_formula": "u(n, N) = d(n) / d(N)",
+    "scale_length_in": 25.5,
+    "tolerance": 1e-09,
+    "fret_positions": [
+      [
+        0,
+        0.0
+      ],
+      [
+        1,
+        0.0561256873183
+      ],
+      [
+        2,
+        0.10910128186
+      ],
+      [
+        3,
+        0.159103584746
+      ],
+      [
+        4,
+        0.206299474016
+      ],
+      [
+        5,
+        0.250846461562
+      ],
+      [
+        6,
+        0.292893218813
+      ],
+      [
+        7,
+        0.332580072915
+      ],
+      [
+        8,
+        0.370039475053
+      ],
+      [
+        9,
+        0.405396442499
+      ],
+      [
+        10,
+        0.438768975845
+      ],
+      [
+        11,
+        0.47026845282
+      ],
+      [
+        12,
+        0.5
+      ],
+      [
+        13,
+        0.528062843659
+      ],
+      [
+        14,
+        0.55455064093
+      ],
+      [
+        15,
+        0.579551792373
+      ],
+      [
+        16,
+        0.603149737008
+      ],
+      [
+        17,
+        0.625423230781
+      ],
+      [
+        18,
+        0.646446609407
+      ],
+      [
+        19,
+        0.666290036457
+      ],
+      [
+        20,
+        0.685019737526
+      ],
+      [
+        21,
+        0.702698221249
+      ],
+      [
+        22,
+        0.719384487923
+      ],
+      [
+        23,
+        0.73513422641
+      ],
+      [
+        24,
+        0.75
+      ]
+    ],
+    "cell_centres": [
+      [
+        1,
+        0.0280628436592
+      ],
+      [
+        2,
+        0.082613484589
+      ],
+      [
+        3,
+        0.134102433303
+      ],
+      [
+        4,
+        0.182701529381
+      ],
+      [
+        5,
+        0.228572967789
+      ],
+      [
+        6,
+        0.271869840188
+      ],
+      [
+        7,
+        0.312736645864
+      ],
+      [
+        8,
+        0.351309773984
+      ],
+      [
+        9,
+        0.387717958776
+      ],
+      [
+        10,
+        0.422082709172
+      ],
+      [
+        11,
+        0.454518714333
+      ],
+      [
+        12,
+        0.48513422641
+      ],
+      [
+        13,
+        0.51403142183
+      ],
+      [
+        14,
+        0.541306742294
+      ],
+      [
+        15,
+        0.567051216651
+      ],
+      [
+        16,
+        0.591350764691
+      ],
+      [
+        17,
+        0.614286483894
+      ],
+      [
+        18,
+        0.635934920094
+      ],
+      [
+        19,
+        0.656368322932
+      ],
+      [
+        20,
+        0.675654886992
+      ],
+      [
+        21,
+        0.693858979388
+      ],
+      [
+        22,
+        0.711041354586
+      ],
+      [
+        23,
+        0.727259357166
+      ],
+      [
+        24,
+        0.742567113205
+      ]
+    ],
+    "display_normalized": [
+      {
+        "highest_displayed_fret": 12,
+        "u": [
+          [
+            0,
+            0.0
+          ],
+          [
+            1,
+            0.112251374637
+          ],
+          [
+            2,
+            0.218202563719
+          ],
+          [
+            3,
+            0.318207169493
+          ],
+          [
+            4,
+            0.412598948032
+          ],
+          [
+            5,
+            0.501692923123
+          ],
+          [
+            6,
+            0.585786437627
+          ],
+          [
+            7,
+            0.66516014583
+          ],
+          [
+            8,
+            0.740078950105
+          ],
+          [
+            9,
+            0.810792884997
+          ],
+          [
+            10,
+            0.877537951691
+          ],
+          [
+            11,
+            0.940536905641
+          ],
+          [
+            12,
+            1.0
+          ]
+        ]
+      },
+      {
+        "highest_displayed_fret": 15,
+        "u": [
+          [
+            0,
+            0.0
+          ],
+          [
+            1,
+            0.0968432641516
+          ],
+          [
+            2,
+            0.18825113354
+          ],
+          [
+            3,
+            0.274528673434
+          ],
+          [
+            4,
+            0.3559638271
+          ],
+          [
+            5,
+            0.432828376795
+          ],
+          [
+            6,
+            0.505378850808
+          ],
+          [
+            7,
+            0.573857379602
+          ],
+          [
+            8,
+            0.638492503901
+          ],
+          [
+            9,
+            0.699499937423
+          ],
+          [
+            10,
+            0.757083286808
+          ],
+          [
+            11,
+            0.81143473113
+          ],
+          [
+            12,
+            0.862735663283
+          ],
+          [
+            13,
+            0.911157295359
+          ],
+          [
+            14,
+            0.956861230053
+          ],
+          [
+            15,
+            1.0
+          ]
+        ]
+      },
+      {
+        "highest_displayed_fret": 20,
+        "u": [
+          [
+            0,
+            0.0
+          ],
+          [
+            1,
+            0.0819329491454
+          ],
+          [
+            2,
+            0.159267355206
+          ],
+          [
+            3,
+            0.232261314573
+          ],
+          [
+            4,
+            0.3011584378
+          ],
+          [
+            5,
+            0.366188662633
+          ],
+          [
+            6,
+            0.427569021399
+          ],
+          [
+            7,
+            0.485504365343
+          ],
+          [
+            8,
+            0.540188048287
+          ],
+          [
+            9,
+            0.591802571941
+          ],
+          [
+            10,
+            0.64052019498
+          ],
+          [
+            11,
+            0.686503507941
+          ],
+          [
+            12,
+            0.729905975856
+          ],
+          [
+            13,
+            0.770872450429
+          ],
+          [
+            14,
+            0.809539653459
+          ],
+          [
+            15,
+            0.846036633143
+          ],
+          [
+            16,
+            0.880485194757
+          ],
+          [
+            17,
+            0.913000307173
+          ],
+          [
+            18,
+            0.943690486556
+          ],
+          [
+            19,
+            0.972658158528
+          ],
+          [
+            20,
+            1.0
+          ]
+        ]
+      },
+      {
+        "highest_displayed_fret": 24,
+        "u": [
+          [
+            0,
+            0.0
+          ],
+          [
+            1,
+            0.0748342497577
+          ],
+          [
+            2,
+            0.145468375813
+          ],
+          [
+            3,
+            0.212138112995
+          ],
+          [
+            4,
+            0.275065965355
+          ],
+          [
+            5,
+            0.334461948749
+          ],
+          [
+            6,
+            0.390524291751
+          ],
+          [
+            7,
+            0.44344009722
+          ],
+          [
+            8,
+            0.493385966737
+          ],
+          [
+            9,
+            0.540528589998
+          ],
+          [
+            10,
+            0.585025301127
+          ],
+          [
+            11,
+            0.62702460376
+          ],
+          [
+            12,
+            0.666666666667
+          ],
+          [
+            13,
+            0.704083791546
+          ],
+          [
+            14,
+            0.739400854573
+          ],
+          [
+            15,
+            0.772735723164
+          ],
+          [
+            16,
+            0.804199649344
+          ],
+          [
+            17,
+            0.833897641041
+          ],
+          [
+            18,
+            0.861928812542
+          ],
+          [
+            19,
+            0.888386715277
+          ],
+          [
+            20,
+            0.913359650035
+          ],
+          [
+            21,
+            0.936930961666
+          ],
+          [
+            22,
+            0.95917931723
+          ],
+          [
+            23,
+            0.980178968547
+          ],
+          [
+            24,
+            1.0
+          ]
+        ]
+      }
+    ],
+    "identities": [
+      {
+        "name": "octave at the midpoint",
+        "expr": "d(12)",
+        "expect": 0.5,
+        "tolerance": 1e-12
+      },
+      {
+        "name": "two octaves",
+        "expr": "d(24)",
+        "expect": 0.75,
+        "tolerance": 1e-12
+      },
+      {
+        "name": "first fret is 1/17.8171537 of the string",
+        "expr": "1/d(1)",
+        "expect": 17.8171537451,
+        "tolerance": 1e-06
+      }
+    ]
+  },
+  "inlays": {
+    "single": [
+      3,
+      5,
+      7,
+      9,
+      15,
+      17,
+      19,
+      21
+    ],
+    "double": [
+      12,
+      24
+    ],
+    "placement": "cell centre, between the two fret wires",
+    "cases": [
+      {
+        "fret": 3,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.134102433303
+      },
+      {
+        "fret": 5,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.228572967789
+      },
+      {
+        "fret": 7,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.312736645864
+      },
+      {
+        "fret": 9,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.387717958776
+      },
+      {
+        "fret": 12,
+        "kind": "double",
+        "count": 2,
+        "centre": 0.48513422641
+      },
+      {
+        "fret": 15,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.567051216651
+      },
+      {
+        "fret": 17,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.614286483894
+      },
+      {
+        "fret": 19,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.656368322932
+      },
+      {
+        "fret": 21,
+        "kind": "single",
+        "count": 1,
+        "centre": 0.693858979388
+      },
+      {
+        "fret": 24,
+        "kind": "double",
+        "count": 2,
+        "centre": 0.742567113205
+      }
+    ]
+  },
+  "strings": {
+    "order": "api_index 0 is the low E, ascending in pitch",
+    "width_ratio_formula": "sqrt(gauge / 0.010)",
+    "cases": [
+      {
+        "api_index": 0,
+        "label": "E",
+        "open_midi": 40,
+        "player_number": 6,
+        "gauge_in": 0.046,
+        "width_ratio": 2.14476105895
+      },
+      {
+        "api_index": 1,
+        "label": "A",
+        "open_midi": 45,
+        "player_number": 5,
+        "gauge_in": 0.036,
+        "width_ratio": 1.8973665961
+      },
+      {
+        "api_index": 2,
+        "label": "D",
+        "open_midi": 50,
+        "player_number": 4,
+        "gauge_in": 0.026,
+        "width_ratio": 1.61245154966
+      },
+      {
+        "api_index": 3,
+        "label": "G",
+        "open_midi": 55,
+        "player_number": 3,
+        "gauge_in": 0.017,
+        "width_ratio": 1.30384048104
+      },
+      {
+        "api_index": 4,
+        "label": "B",
+        "open_midi": 59,
+        "player_number": 2,
+        "gauge_in": 0.013,
+        "width_ratio": 1.1401754251
+      },
+      {
+        "api_index": 5,
+        "label": "e",
+        "open_midi": 64,
+        "player_number": 1,
+        "gauge_in": 0.01,
+        "width_ratio": 1.0
+      }
+    ]
+  },
+  "orientation": {
+    "default": "high-e-top",
+    "values": [
+      "high-e-top",
+      "low-e-top"
+    ],
+    "row_formula": {
+      "high-e-top": "row = count - 1 - api_index",
+      "low-e-top": "row = api_index"
+    },
+    "y_formula": "y = (row + 0.5) / count",
+    "x_formula": "x = 0 when fret == 0, else cell(fret) / d(N)",
+    "cases": [
+      {
+        "orientation": "high-e-top",
+        "api_index": 0,
+        "fret": 0,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 5,
+        "point": {
+          "x": 0.0,
+          "y": 0.916666666667
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 5,
+        "fret": 0,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 0,
+        "point": {
+          "x": 0.0,
+          "y": 0.0833333333333
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 0,
+        "fret": 1,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 5,
+        "point": {
+          "x": 0.0374171248789,
+          "y": 0.916666666667
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 0,
+        "fret": 12,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 5,
+        "point": {
+          "x": 0.646845635214,
+          "y": 0.916666666667
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 5,
+        "fret": 12,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 0,
+        "point": {
+          "x": 0.646845635214,
+          "y": 0.0833333333333
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 2,
+        "fret": 3,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 3,
+        "point": {
+          "x": 0.178803244404,
+          "y": 0.583333333333
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 3,
+        "fret": 5,
+        "string_count": 6,
+        "highest_displayed_fret": 15,
+        "row": 2,
+        "point": {
+          "x": 0.394396101948,
+          "y": 0.416666666667
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 0,
+        "fret": 8,
+        "string_count": 6,
+        "highest_displayed_fret": 15,
+        "row": 5,
+        "point": {
+          "x": 0.606174941752,
+          "y": 0.916666666667
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 5,
+        "fret": 19,
+        "string_count": 6,
+        "highest_displayed_fret": 20,
+        "row": 0,
+        "point": {
+          "x": 0.958174322542,
+          "y": 0.0833333333333
+        }
+      },
+      {
+        "orientation": "high-e-top",
+        "api_index": 2,
+        "fret": 7,
+        "string_count": 6,
+        "highest_displayed_fret": 12,
+        "row": 3,
+        "point": {
+          "x": 0.625473291728,
+          "y": 0.583333333333
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 0,
+        "fret": 0,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 0,
+        "point": {
+          "x": 0.0,
+          "y": 0.0833333333333
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 5,
+        "fret": 0,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 5,
+        "point": {
+          "x": 0.0,
+          "y": 0.916666666667
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 0,
+        "fret": 1,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 0,
+        "point": {
+          "x": 0.0374171248789,
+          "y": 0.0833333333333
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 0,
+        "fret": 12,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 0,
+        "point": {
+          "x": 0.646845635214,
+          "y": 0.0833333333333
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 5,
+        "fret": 12,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 5,
+        "point": {
+          "x": 0.646845635214,
+          "y": 0.916666666667
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 2,
+        "fret": 3,
+        "string_count": 6,
+        "highest_displayed_fret": 24,
+        "row": 2,
+        "point": {
+          "x": 0.178803244404,
+          "y": 0.416666666667
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 3,
+        "fret": 5,
+        "string_count": 6,
+        "highest_displayed_fret": 15,
+        "row": 3,
+        "point": {
+          "x": 0.394396101948,
+          "y": 0.583333333333
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 0,
+        "fret": 8,
+        "string_count": 6,
+        "highest_displayed_fret": 15,
+        "row": 0,
+        "point": {
+          "x": 0.606174941752,
+          "y": 0.0833333333333
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 5,
+        "fret": 19,
+        "string_count": 6,
+        "highest_displayed_fret": 20,
+        "row": 5,
+        "point": {
+          "x": 0.958174322542,
+          "y": 0.916666666667
+        }
+      },
+      {
+        "orientation": "low-e-top",
+        "api_index": 2,
+        "fret": 7,
+        "string_count": 6,
+        "highest_displayed_fret": 12,
+        "row": 2,
+        "point": {
+          "x": 0.625473291728,
+          "y": 0.416666666667
+        }
+      }
+    ]
+  },
+  "chords": {
+    "spelling": [
+      "C",
+      "C#",
+      "D",
+      "D#",
+      "E",
+      "F",
+      "F#",
+      "G",
+      "G#",
+      "A",
+      "A#",
+      "B"
+    ],
+    "cases": [
+      {
+        "source": "transcription",
+        "at": 3.101,
+        "positions": [
+          [
+            1,
+            3
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          48,
+          55,
+          60
+        ],
+        "expect": "C5",
+        "note": "open-position power chord, open G string sounding"
+      },
+      {
+        "source": "transcription",
+        "at": 6.355,
+        "positions": [
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            2
+          ]
+        ],
+        "pitches": [
+          50,
+          57
+        ],
+        "expect": "D5",
+        "note": "two-note fragment on open D"
+      },
+      {
+        "source": "transcription",
+        "at": 14.974,
+        "positions": [
+          [
+            0,
+            6
+          ],
+          [
+            1,
+            8
+          ]
+        ],
+        "pitches": [
+          46,
+          53
+        ],
+        "expect": "A#5",
+        "note": "two-note fragment, fifth dyad, both fretted"
+      },
+      {
+        "source": "transcription",
+        "at": 9.699,
+        "positions": [
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          55,
+          60
+        ],
+        "expect": "C5/G",
+        "note": "two-note fragment, fifth dyad, bass is the fifth -> slash"
+      },
+      {
+        "source": "transcription",
+        "at": 9.084,
+        "positions": [
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            3
+          ]
+        ],
+        "pitches": [
+          53,
+          58
+        ],
+        "expect": "A#5/F",
+        "note": "two-note fragment, fourth dyad -> root is the upper note"
+      },
+      {
+        "source": "transcription",
+        "at": 101.397,
+        "positions": [
+          [
+            2,
+            7
+          ],
+          [
+            5,
+            10
+          ]
+        ],
+        "pitches": [
+          57,
+          74
+        ],
+        "expect": "D5/A",
+        "note": "two-note fragment spanning two octaves"
+      },
+      {
+        "source": "transcription",
+        "at": 208.498,
+        "positions": [
+          [
+            4,
+            1
+          ],
+          [
+            5,
+            1
+          ]
+        ],
+        "pitches": [
+          60,
+          65
+        ],
+        "expect": "F5/C",
+        "note": "two-note fourth dyad at the first fret"
+      },
+      {
+        "source": "transcription",
+        "at": 33.33,
+        "positions": [
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "pitches": [
+          50,
+          55
+        ],
+        "expect": "G5/D",
+        "note": "two open strings, fourth dyad"
+      },
+      {
+        "source": "transcription",
+        "at": 56.994,
+        "positions": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          53,
+          60
+        ],
+        "expect": "F5",
+        "note": "two-note fifth dyad"
+      },
+      {
+        "source": "transcription",
+        "at": 13.999,
+        "positions": [
+          [
+            0,
+            8
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "pitches": [
+          48,
+          52,
+          55
+        ],
+        "expect": "C",
+        "note": "major triad, root position"
+      },
+      {
+        "source": "transcription",
+        "at": 3.949,
+        "positions": [
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            2
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          53,
+          57,
+          60
+        ],
+        "expect": "F",
+        "note": "open-position major triad"
+      },
+      {
+        "source": "transcription",
+        "at": 8.701,
+        "positions": [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            3
+          ]
+        ],
+        "pitches": [
+          46,
+          53,
+          62
+        ],
+        "expect": "A#",
+        "note": "major triad spread across three strings"
+      },
+      {
+        "source": "transcription",
+        "at": 110.423,
+        "positions": [
+          [
+            0,
+            12
+          ],
+          [
+            1,
+            15
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "pitches": [
+          52,
+          55,
+          60
+        ],
+        "expect": "C/E",
+        "note": "major triad, first inversion -> slash"
+      },
+      {
+        "source": "transcription",
+        "at": 163.446,
+        "positions": [
+          [
+            2,
+            5
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            5,
+            3
+          ]
+        ],
+        "pitches": [
+          55,
+          60,
+          64,
+          67
+        ],
+        "expect": "C/G",
+        "note": "barre at frets 3-5, second inversion -> slash"
+      },
+      {
+        "source": "transcription",
+        "at": 122.749,
+        "positions": [
+          [
+            1,
+            0
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            5
+          ]
+        ],
+        "pitches": [
+          45,
+          53,
+          60
+        ],
+        "expect": "F/A",
+        "note": "major triad over its third, open A in the bass"
+      },
+      {
+        "source": "transcription",
+        "at": 21.828,
+        "positions": [
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            4,
+            3
+          ]
+        ],
+        "pitches": [
+          53,
+          58,
+          62
+        ],
+        "expect": "A#/F",
+        "note": "major triad over its fifth"
+      },
+      {
+        "source": "transcription",
+        "at": 85.422,
+        "positions": [
+          [
+            0,
+            10
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            3,
+            7
+          ]
+        ],
+        "pitches": [
+          50,
+          53,
+          57,
+          62
+        ],
+        "expect": "Dm",
+        "note": "minor triad, root position, four notes"
+      },
+      {
+        "source": "transcription",
+        "at": 60.48,
+        "positions": [
+          [
+            2,
+            5
+          ],
+          [
+            3,
+            3
+          ],
+          [
+            4,
+            3
+          ]
+        ],
+        "pitches": [
+          55,
+          58,
+          62
+        ],
+        "expect": "Gm",
+        "note": "minor triad"
+      },
+      {
+        "source": "transcription",
+        "at": 139.247,
+        "positions": [
+          [
+            1,
+            3
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            4
+          ]
+        ],
+        "pitches": [
+          48,
+          55,
+          63
+        ],
+        "expect": "Cm",
+        "note": "minor triad with an open string"
+      },
+      {
+        "source": "transcription",
+        "at": 53.696,
+        "positions": [
+          [
+            2,
+            2
+          ],
+          [
+            3,
+            2
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          52,
+          57,
+          60
+        ],
+        "expect": "Am/E",
+        "note": "minor triad, second inversion -> slash"
+      },
+      {
+        "source": "transcription",
+        "at": 101.001,
+        "positions": [
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            3,
+            7
+          ]
+        ],
+        "pitches": [
+          53,
+          57,
+          62
+        ],
+        "expect": "Dm/F",
+        "note": "minor triad, first inversion -> slash"
+      },
+      {
+        "source": "transcription",
+        "at": 49.211,
+        "positions": [
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          53,
+          55,
+          60
+        ],
+        "expect": "Fsus2",
+        "note": "sus2"
+      },
+      {
+        "source": "transcription",
+        "at": 130.22,
+        "positions": [
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ]
+        ],
+        "pitches": [
+          48,
+          50,
+          55
+        ],
+        "expect": "Csus2",
+        "note": "sus2 with two open strings"
+      },
+      {
+        "source": "transcription",
+        "at": 65.569,
+        "positions": [
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            2
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            0
+          ]
+        ],
+        "pitches": [
+          50,
+          57,
+          62,
+          64
+        ],
+        "expect": "Dsus2",
+        "note": "sus2, four notes, two open strings"
+      },
+      {
+        "source": "transcription",
+        "at": 141.338,
+        "positions": [
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            3
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          48,
+          53,
+          55,
+          60
+        ],
+        "expect": "Csus4",
+        "note": "sus4"
+      },
+      {
+        "source": "transcription",
+        "at": 10.931,
+        "positions": [
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          50,
+          55,
+          60
+        ],
+        "expect": "Gsus4/D",
+        "note": "sus2/sus4 ambiguity: bass is the sus4 root"
+      },
+      {
+        "source": "transcription",
+        "at": 202.619,
+        "positions": [
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            2
+          ],
+          [
+            3,
+            0
+          ],
+          [
+            5,
+            7
+          ]
+        ],
+        "pitches": [
+          48,
+          52,
+          55,
+          71
+        ],
+        "expect": "Cmaj7",
+        "note": "maj7, the only seventh chord in the reference song"
+      },
+      {
+        "source": "transcription",
+        "at": 17.089,
+        "positions": [
+          [
+            0,
+            13
+          ],
+          [
+            1,
+            12
+          ],
+          [
+            2,
+            10
+          ],
+          [
+            3,
+            10
+          ],
+          [
+            5,
+            15
+          ]
+        ],
+        "pitches": [
+          53,
+          57,
+          60,
+          65,
+          79
+        ],
+        "expect": "Fadd9",
+        "note": "add9, five notes, barre at frets 10-15"
+      },
+      {
+        "source": "transcription",
+        "at": 69.705,
+        "positions": [
+          [
+            0,
+            8
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            7
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            5,
+            8
+          ]
+        ],
+        "pitches": [
+          48,
+          53,
+          57,
+          60,
+          65,
+          72
+        ],
+        "expect": "F/C",
+        "note": "SIX-note voicing, major triad over its fifth -> slash"
+      },
+      {
+        "source": "transcription",
+        "at": 99.341,
+        "positions": [
+          [
+            0,
+            8
+          ],
+          [
+            1,
+            7
+          ],
+          [
+            2,
+            5
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            4,
+            5
+          ],
+          [
+            5,
+            8
+          ]
+        ],
+        "pitches": [
+          48,
+          52,
+          55,
+          60,
+          64,
+          72
+        ],
+        "expect": "C",
+        "note": "SIX-note barre voicing, root doubled at three octaves"
+      },
+      {
+        "source": "transcription",
+        "at": 109.215,
+        "positions": [
+          [
+            0,
+            6
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            8
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            6
+          ]
+        ],
+        "pitches": [
+          46,
+          53,
+          58,
+          60,
+          62,
+          70
+        ],
+        "expect": "A#add9",
+        "note": "SIX-note voicing, add9"
+      },
+      {
+        "source": "transcription",
+        "at": 160.019,
+        "positions": [
+          [
+            0,
+            6
+          ],
+          [
+            1,
+            8
+          ],
+          [
+            2,
+            8
+          ],
+          [
+            3,
+            7
+          ],
+          [
+            4,
+            6
+          ],
+          [
+            5,
+            10
+          ]
+        ],
+        "pitches": [
+          46,
+          53,
+          58,
+          62,
+          65,
+          74
+        ],
+        "expect": "A#",
+        "note": "SIX-note voicing, major triad, root and fifth doubled"
+      },
+      {
+        "source": "transcription",
+        "at": 11.303,
+        "positions": [
+          [
+            1,
+            3
+          ],
+          [
+            2,
+            2
+          ]
+        ],
+        "pitches": [
+          48,
+          52
+        ],
+        "expect": null,
+        "note": "REFUSED: major-third dyad, quality undetermined"
+      },
+      {
+        "source": "transcription",
+        "at": 1.045,
+        "positions": [
+          [
+            3,
+            2
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          57,
+          60
+        ],
+        "expect": null,
+        "note": "REFUSED: minor-third dyad, quality undetermined"
+      },
+      {
+        "source": "transcription",
+        "at": 2.103,
+        "positions": [
+          [
+            2,
+            3
+          ],
+          [
+            4,
+            3
+          ]
+        ],
+        "pitches": [
+          53,
+          62
+        ],
+        "expect": null,
+        "note": "REFUSED: major-sixth dyad, quality undetermined"
+      },
+      {
+        "source": "transcription",
+        "at": 0.871,
+        "positions": [
+          [
+            3,
+            2
+          ],
+          [
+            5,
+            1
+          ]
+        ],
+        "pitches": [
+          57,
+          65
+        ],
+        "expect": null,
+        "note": "REFUSED: minor-sixth dyad, quality undetermined"
+      },
+      {
+        "source": "transcription",
+        "at": 78.801,
+        "positions": [
+          [
+            2,
+            0
+          ],
+          [
+            5,
+            0
+          ]
+        ],
+        "pitches": [
+          50,
+          64
+        ],
+        "expect": null,
+        "note": "REFUSED: major-second dyad, two open strings"
+      },
+      {
+        "source": "transcription",
+        "at": 86.573,
+        "positions": [
+          [
+            2,
+            2
+          ],
+          [
+            4,
+            4
+          ]
+        ],
+        "pitches": [
+          52,
+          63
+        ],
+        "expect": null,
+        "note": "REFUSED: minor-second dyad"
+      },
+      {
+        "source": "transcription",
+        "at": 145.903,
+        "positions": [
+          [
+            2,
+            4
+          ],
+          [
+            3,
+            5
+          ]
+        ],
+        "pitches": [
+          54,
+          60
+        ],
+        "expect": null,
+        "note": "REFUSED: tritone dyad, root undetermined"
+      },
+      {
+        "source": "transcription",
+        "at": 131.417,
+        "positions": [
+          [
+            2,
+            0
+          ],
+          [
+            3,
+            5
+          ],
+          [
+            5,
+            5
+          ]
+        ],
+        "pitches": [
+          50,
+          60,
+          69
+        ],
+        "expect": null,
+        "note": "REFUSED: root, fifth and seventh, third missing"
+      },
+      {
+        "source": "transcription",
+        "at": 4.53,
+        "positions": [
+          [
+            1,
+            3
+          ],
+          [
+            4,
+            1
+          ]
+        ],
+        "pitches": [
+          48,
+          60
+        ],
+        "expect": null,
+        "note": "REFUSED: octave doubling collapses to one pitch class"
+      },
+      {
+        "source": "transcription",
+        "at": 3.74,
+        "positions": [
+          [
+            2,
+            3
+          ],
+          [
+            5,
+            1
+          ]
+        ],
+        "pitches": [
+          53,
+          65
+        ],
+        "expect": null,
+        "note": "REFUSED: octave doubling across four strings"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          64,
+          67
+        ],
+        "expect": "C",
+        "note": "major"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          63,
+          67
+        ],
+        "expect": "Cm",
+        "note": "minor"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          64,
+          67,
+          70
+        ],
+        "expect": "C7",
+        "note": "dominant 7"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          63,
+          67,
+          70
+        ],
+        "expect": "Cm7",
+        "note": "m7"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          64,
+          67,
+          71
+        ],
+        "expect": "Cmaj7",
+        "note": "maj7"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          64,
+          67,
+          69
+        ],
+        "expect": "C6",
+        "note": "6, bass is the root"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          57,
+          60,
+          64,
+          67
+        ],
+        "expect": "Am7",
+        "note": "6/m7 ambiguity: same pitch classes, bass A -> m7"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          63,
+          67,
+          69
+        ],
+        "expect": "Cm6",
+        "note": "m6"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          65,
+          67
+        ],
+        "expect": "Csus4",
+        "note": "sus4"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          62,
+          67
+        ],
+        "expect": "Csus2",
+        "note": "sus2, bass is the sus2 root"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          62,
+          67,
+          72
+        ],
+        "expect": "Gsus4/D",
+        "note": "sus2/sus4 ambiguity: bass in neither root -> sus4 wins"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          62,
+          64,
+          67
+        ],
+        "expect": "Cadd9",
+        "note": "add9"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          62,
+          63,
+          67
+        ],
+        "expect": "Cmadd9",
+        "note": "madd9"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          63,
+          66
+        ],
+        "expect": "Cdim",
+        "note": "dim"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          64,
+          68
+        ],
+        "expect": "Caug",
+        "note": "aug, bass is a matching root"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          64,
+          68,
+          72
+        ],
+        "expect": "Eaug",
+        "note": "aug symmetry: three roots match, bass E wins"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          63,
+          66,
+          70
+        ],
+        "expect": "Cm7b5",
+        "note": "m7b5"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          63,
+          66,
+          69
+        ],
+        "expect": "Cdim7",
+        "note": "dim7, bass is a matching root"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          63,
+          66,
+          69,
+          72
+        ],
+        "expect": "D#dim7",
+        "note": "dim7 symmetry: four roots match, bass D# wins"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          67
+        ],
+        "expect": "C5",
+        "note": "power chord, bare fifth"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          67,
+          72
+        ],
+        "expect": "C5/G",
+        "note": "fourth dyad -> root is the upper note, slash"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          72
+        ],
+        "expect": null,
+        "note": "REFUSED: octave"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60
+        ],
+        "expect": null,
+        "note": "REFUSED: single note"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          61
+        ],
+        "expect": null,
+        "note": "REFUSED: semitone dyad"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          66
+        ],
+        "expect": null,
+        "note": "REFUSED: tritone dyad"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          64,
+          67,
+          71,
+          74
+        ],
+        "expect": null,
+        "note": "REFUSED: five distinct pitch classes, no template"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          62,
+          64,
+          65,
+          67,
+          69
+        ],
+        "expect": null,
+        "note": "REFUSED: six distinct pitch classes, a scale run"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          61,
+          62
+        ],
+        "expect": null,
+        "note": "REFUSED: chromatic cluster"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          60,
+          64,
+          67,
+          61
+        ],
+        "expect": null,
+        "note": "REFUSED: major triad plus a semitone neighbour"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          48,
+          60,
+          64,
+          67
+        ],
+        "expect": "C",
+        "note": "major triad with the root doubled an octave down"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          67,
+          60,
+          64
+        ],
+        "expect": "C",
+        "note": "unsorted input: bass is the lowest pitch, not the first"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          72,
+          48,
+          55,
+          64
+        ],
+        "expect": "C",
+        "note": "unsorted input with a doubled root two octaves apart"
+      },
+      {
+        "source": "synthetic",
+        "pitches": [
+          65,
+          53,
+          57,
+          60,
+          79
+        ],
+        "expect": "Fadd9",
+        "note": "unsorted five-note add9, bass is the second element"
+      }
+    ]
+  },
+  "hand_position": {
+    "window_back_s": 0.5,
+    "window_forward_s": 1.5,
+    "box_frets": 5,
+    "max_fret": 20,
+    "rule": "discard frets < 1, take the lower median c of what remains, box = [c-2, c+2], then shift the box to fit [1, max_fret]. Empty -> null.",
+    "cases": [
+      {
+        "source": "transcription",
+        "at": 5.0,
+        "window": [
+          4.5,
+          6.5
+        ],
+        "frets": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          2,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3
+        ],
+        "expect": [
+          1,
+          5
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 18.0,
+        "window": [
+          17.5,
+          19.5
+        ],
+        "frets": [
+          0,
+          0,
+          2,
+          2,
+          3,
+          3,
+          7,
+          8,
+          8,
+          10,
+          10,
+          12,
+          12,
+          13,
+          15
+        ],
+        "expect": [
+          6,
+          10
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 55.0,
+        "window": [
+          54.5,
+          56.5
+        ],
+        "frets": [
+          0,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          5
+        ],
+        "expect": [
+          1,
+          5
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 70.0,
+        "window": [
+          69.5,
+          71.5
+        ],
+        "frets": [
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          2,
+          3,
+          3,
+          3,
+          3,
+          5,
+          5,
+          6,
+          7,
+          7,
+          7,
+          7,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8
+        ],
+        "expect": [
+          4,
+          8
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 100.0,
+        "window": [
+          99.5,
+          101.5
+        ],
+        "frets": [
+          3,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          5,
+          7,
+          7,
+          7,
+          7,
+          7,
+          7,
+          8,
+          8,
+          8,
+          8,
+          10
+        ],
+        "expect": [
+          5,
+          9
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 110.0,
+        "window": [
+          109.5,
+          111.5
+        ],
+        "frets": [
+          0,
+          0,
+          0,
+          3,
+          5,
+          5,
+          5,
+          6,
+          6,
+          8,
+          8,
+          8,
+          8,
+          8,
+          8,
+          10,
+          10,
+          10,
+          12,
+          12,
+          12,
+          14,
+          15,
+          15,
+          15,
+          15
+        ],
+        "expect": [
+          6,
+          10
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 142.0,
+        "window": [
+          141.5,
+          143.5
+        ],
+        "frets": [
+          0,
+          0,
+          1,
+          1,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          5,
+          5,
+          5,
+          6,
+          8,
+          8,
+          8,
+          10
+        ],
+        "expect": [
+          1,
+          5
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 165.0,
+        "window": [
+          164.5,
+          166.5
+        ],
+        "frets": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          5,
+          6,
+          6,
+          6,
+          7,
+          7,
+          7,
+          7,
+          7,
+          8,
+          8,
+          8,
+          8,
+          10
+        ],
+        "expect": [
+          3,
+          7
+        ]
+      },
+      {
+        "source": "transcription",
+        "at": 203.0,
+        "window": [
+          202.5,
+          204.5
+        ],
+        "frets": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          1,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          2,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          7
+        ],
+        "expect": [
+          1,
+          5
+        ]
+      },
+      {
+        "source": "synthetic",
+        "frets": [],
+        "expect": null,
+        "note": "no notes at all"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          0,
+          0,
+          0
+        ],
+        "expect": null,
+        "note": "every note open -> no hand position"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          1
+        ],
+        "expect": [
+          1,
+          5
+        ],
+        "note": "single note at the first fret, clamped at the nut"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          1,
+          2,
+          3
+        ],
+        "expect": [
+          1,
+          5
+        ],
+        "note": "first position, clamped at the nut"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          5
+        ],
+        "expect": [
+          3,
+          7
+        ],
+        "note": "single fretted note"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          3,
+          5,
+          7
+        ],
+        "expect": [
+          3,
+          7
+        ],
+        "note": "median 5"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          0,
+          0,
+          5,
+          7
+        ],
+        "expect": [
+          3,
+          7
+        ],
+        "note": "open strings excluded from the span"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          19,
+          20
+        ],
+        "expect": [
+          16,
+          20
+        ],
+        "note": "clamped at the top of the neck"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          20
+        ],
+        "expect": [
+          16,
+          20
+        ],
+        "note": "top fret, clamped"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          2,
+          3,
+          15,
+          16
+        ],
+        "expect": [
+          1,
+          5
+        ],
+        "note": "outlier: median 3 keeps the box low"
+      },
+      {
+        "source": "synthetic",
+        "frets": [
+          2,
+          15,
+          16,
+          17
+        ],
+        "expect": [
+          13,
+          17
+        ],
+        "note": "outlier: median 15 keeps the box high"
+      }
+    ]
+  }
+}

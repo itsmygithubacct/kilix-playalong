@@ -43,13 +43,6 @@ def cache_home() -> Path:
     return _xdg("XDG_CACHE_HOME", Path.home() / ".cache") / APP_ID
 
 
-def state_home() -> Path:
-    override = _absolute_env("KILIX_PLAYALONG_STATE_HOME")
-    if override is not None:
-        return override
-    return _xdg("XDG_STATE_HOME", Path.home() / ".local" / "state") / APP_ID
-
-
 def ensure_private_directory(path: Path) -> Path:
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     with suppress(OSError):

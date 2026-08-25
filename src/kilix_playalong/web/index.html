@@ -76,6 +76,15 @@
             <span class="meta-label">Source</span>
             <strong>Private local project</strong>
           </div>
+          <div class="hero-timeline">
+            <canvas id="minimap" class="minimap" aria-hidden="true"></canvas>
+            <label class="sr-only" for="timeline">Playback position</label>
+            <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" disabled>
+            <div class="timeline-times" aria-hidden="true">
+              <span id="elapsed-time">00:00</span>
+              <span id="remaining-time">--:--</span>
+            </div>
+          </div>
         </section>
 
         <div class="notice-bar" id="inline-notice" role="status" aria-live="polite" hidden></div>
@@ -98,26 +107,45 @@
                 </button>
                 <button class="icon-button" id="forward-five" type="button" aria-label="Seek forward five seconds" title="Forward 5 seconds">+5</button>
               </div>
-              <div class="timeline-wrap">
-                <label class="sr-only" for="timeline">Playback position</label>
-                <input id="timeline" type="range" min="0" max="0" value="0" step="0.01" disabled>
-                <div class="timeline-times" aria-hidden="true">
-                  <span id="elapsed-time">00:00</span>
-                  <span id="remaining-time">--:--</span>
-                </div>
-              </div>
               <div class="transport-options">
-                <label class="select-label" for="playback-rate">Speed
-                  <select id="playback-rate">
-                    <option value="0.5">0.5×</option>
-                    <option value="0.75">0.75×</option>
-                    <option value="1" selected>1×</option>
-                    <option value="1.25">1.25×</option>
-                    <option value="1.5">1.5×</option>
-                  </select>
+                <label class="range-label" for="rate-range">
+                  <span>Speed <strong id="rate-value">100%</strong></span>
+                  <input id="rate-range" type="range" min="0.5" max="1.5" step="0.05" value="1">
                 </label>
                 <button class="button button-small" id="reset-position" type="button">Back to start</button>
               </div>
+            </section>
+
+            <section class="control-section loop-card" aria-labelledby="loop-title">
+              <div class="section-heading section-heading-tight">
+                <div>
+                  <p class="eyebrow">Practice loop</p>
+                  <h2 id="loop-title">Repeat a passage</h2>
+                </div>
+              </div>
+              <p class="loop-readout" id="loop-readout">Loop off</p>
+              <div class="loop-buttons">
+                <button class="button button-small" id="loop-in" type="button" title="Set the loop start ([)">Set in</button>
+                <button class="button button-small" id="loop-out" type="button" title="Set the loop end (])">Set out</button>
+                <button class="button button-small" id="loop-clear" type="button" title="Clear the loop (Backspace)">Clear</button>
+              </div>
+              <div class="loop-options">
+                <label class="select-label" for="preroll">Pre-roll
+                  <select id="preroll">
+                    <option value="0">None</option>
+                    <option value="1">1 second</option>
+                    <option value="2">2 seconds</option>
+                  </select>
+                </label>
+                <button class="toggle-button" id="ladder-toggle" type="button" aria-pressed="false">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Speed ladder off</span>
+                </button>
+              </div>
+              <p class="muted small-copy">
+                The ladder starts five steps below the speed you set and adds 5% on every pass
+                until it gets there.
+              </p>
             </section>
 
             <section class="control-section" aria-labelledby="tracks-title">
@@ -130,6 +158,11 @@
               <div class="track-list" id="track-list" aria-live="polite">
                 <p class="muted small-copy">Loading stems…</p>
               </div>
+              <p class="muted small-copy">
+                Keys 1–6 select a stem, m mutes it, s solos it, and − and + move its level.
+                A browser caps a stem at its recorded level, so this mixer cannot lift a quiet
+                one above 100%.
+              </p>
             </section>
 
             <section class="control-section" aria-labelledby="layers-title">
@@ -144,24 +177,119 @@
                   <span class="toggle-led" aria-hidden="true"></span>
                   <span class="toggle-copy">Guide vocals</span>
                 </button>
+                <button class="toggle-button is-on" id="toggle-guitar" type="button" aria-pressed="true">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Guitar stem</span>
+                </button>
                 <button class="toggle-button is-on" id="toggle-lyrics" type="button" aria-pressed="true">
                   <span class="toggle-led" aria-hidden="true"></span>
                   <span class="toggle-copy">Lyrics on screen</span>
                 </button>
+                <button class="toggle-button is-on" id="toggle-tab" type="button" aria-pressed="true">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Tab lane</span>
+                </button>
+                <button class="toggle-button is-on" id="toggle-neck" type="button" aria-pressed="true">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Fretboard</span>
+                </button>
               </div>
+              <p class="muted small-copy">
+                Vocals and the guitar stem are audio; lyrics, the lane and the fretboard are
+                display. Hiding the words never mutes the singer, and muting the guitar never
+                hides the tab.
+              </p>
+            </section>
+
+            <section class="control-section display-card" aria-labelledby="display-title">
+              <div class="section-heading section-heading-tight">
+                <div>
+                  <p class="eyebrow">Fretboard</p>
+                  <h2 id="display-title">How it is drawn</h2>
+                </div>
+              </div>
+              <div class="display-controls">
+                <label class="select-label" for="string-order">String order
+                  <select id="string-order">
+                    <option value="high-e-top">High e on top (tab)</option>
+                    <option value="low-e-top">Low E on top (player view)</option>
+                  </select>
+                </label>
+                <label class="select-label" for="zoom-select">Lane speed
+                  <select id="zoom-select">
+                    <option value="56">Wide · 56 px/s</option>
+                    <option value="90">Normal · 90 px/s</option>
+                    <option value="144">Close · 144 px/s</option>
+                  </select>
+                </label>
+                <label class="select-label" for="motion-select">Motion
+                  <select id="motion-select">
+                    <option value="auto">Follow the system</option>
+                    <option value="off">Still picture</option>
+                  </select>
+                </label>
+                <button class="toggle-button" id="handed-toggle" type="button" aria-pressed="false">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Right-handed</span>
+                </button>
+                <button class="toggle-button" id="fingers-toggle" type="button" aria-pressed="false">
+                  <span class="toggle-led" aria-hidden="true"></span>
+                  <span class="toggle-copy">Fret numbers</span>
+                </button>
+              </div>
+              <p class="muted small-copy">
+                String order governs the fretboard and the tab lane together. Suggested fingers
+                are a guess derived from the position box, on top of a fingering that was itself
+                inferred.
+              </p>
             </section>
 
             <section class="shortcut-card" aria-labelledby="shortcuts-title">
               <p class="eyebrow" id="shortcuts-title">Shortcuts</p>
               <p><kbd>Space</kbd> play / pause</p>
-              <p><kbd>←</kbd> <kbd>→</kbd> seek 5 seconds</p>
-              <p><kbd>V</kbd> vocals · <kbd>L</kbd> lyrics</p>
-              <p><kbd>−</kbd> <kbd>+</kbd> nudge position</p>
+              <p><kbd>←</kbd> <kbd>→</kbd> seek 5 s, with <kbd>Shift</kbd> 30 s</p>
+              <p><kbd>[</kbd> <kbd>]</kbd> loop in / out · <kbd>⌫</kbd> clears</p>
+              <p><kbd>1</kbd>–<kbd>6</kbd> select a stem · <kbd>M</kbd> mute · <kbd>S</kbd> solo</p>
+              <p><kbd>−</kbd> <kbd>+</kbd> selected stem level</p>
+              <p><kbd>,</kbd> <kbd>.</kbd> speed down / up</p>
+              <p><kbd>V</kbd> vocals · <kbd>G</kbd> guitar stem</p>
+              <p><kbd>L</kbd> lyrics · <kbd>T</kbd> tab lane · <kbd>F</kbd> fretboard</p>
+              <p><kbd>?</kbd> the full list</p>
               <p class="muted small-copy">Shortcuts pause inside buttons, fields, and menus.</p>
             </section>
           </aside>
 
           <div class="practice-stage">
+            <section class="stage-card neck-card" id="neck-card" aria-labelledby="neck-title">
+              <div class="stage-heading">
+                <div>
+                  <p class="eyebrow">Fretboard</p>
+                  <h2 id="neck-title">On the neck</h2>
+                </div>
+                <div class="neck-readouts" id="neck-readouts">
+                  <span class="chord-readout" id="chord-readout">silence</span>
+                  <span class="chord-notes" id="chord-notes">nothing sounding</span>
+                  <span class="neck-line" id="position-readout">No hand position</span>
+                  <span class="neck-line" id="next-readout">no tab loaded</span>
+                </div>
+              </div>
+              <div class="neck-stage">
+                <canvas id="neck-canvas" class="neck-canvas" aria-hidden="true"></canvas>
+                <p class="neck-strip" id="neck-static-strip" hidden></p>
+                <div class="content-empty" id="neck-empty" hidden></div>
+                <div class="layer-note" id="neck-hidden-note" hidden>
+                  <strong>The fretboard is hidden</strong>
+                  <span>Press F or turn the fretboard layer back on to see the neck again.</span>
+                </div>
+              </div>
+              <p class="neck-footnote">
+                Fret spacing is exact — fret n sits at 1 − 2<sup>−n/12</sup> of the scale length,
+                so the frets crowd as they climb. Strings are spaced evenly and graded by gauge.
+                The chord name, the position box and the string order come from
+                docs/FRETBOARD.md, the definition this project holds both of its surfaces to.
+              </p>
+            </section>
+
             <section class="stage-card lyrics-card" id="lyrics-card" aria-labelledby="lyrics-title">
               <div class="stage-heading">
                 <div>
@@ -170,6 +298,10 @@
                 </div>
                 <span class="stage-status" id="lyrics-status">Waiting for timing</span>
               </div>
+              <p class="timing-note" id="lyrics-timing" hidden>
+                <span class="timing-tag" id="lyrics-timing-tag"></span>
+                <span class="timing-detail" id="lyrics-timing-detail"></span>
+              </p>
               <div class="lyrics-viewport" id="lyrics-viewport">
                 <ol class="lyrics-list" id="lyrics-list" aria-live="off"></ol>
                 <div class="content-empty" id="lyrics-empty" hidden>
@@ -198,6 +330,10 @@
                 <div class="content-empty" id="tab-empty" hidden>
                   <strong>No tab events loaded</strong>
                   <span>Imported or inferred tab will follow the playback cursor here.</span>
+                </div>
+                <div class="layer-note" id="tab-hidden-note" hidden>
+                  <strong>The tab lane is hidden</strong>
+                  <span>Press T or turn the lane back on to read the part as it rolls past.</span>
                 </div>
               </div>
               <p class="print-note print-note-export">
@@ -229,6 +365,40 @@
         </section>
       </section>
     </main>
+
+    <!-- role="dialog" without aria-modal: this panel is a reference list, and nothing here
+         traps focus or blocks the page behind it. Claiming modality it does not have would
+         tell a screen reader the rest of the page is unreachable when it is not. -->
+    <div class="shortcut-overlay" id="shortcut-overlay" role="dialog"
+      aria-labelledby="overlay-title" hidden>
+      <div class="shortcut-panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">Keyboard</p>
+            <h2 id="overlay-title">Every shortcut</h2>
+          </div>
+          <button class="button button-quiet" id="shortcut-close" type="button">Close</button>
+        </div>
+        <dl class="shortcut-table">
+          <dt><kbd>Space</kbd></dt><dd>play / pause</dd>
+          <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>seek 5 seconds, 30 with <kbd>Shift</kbd></dd>
+          <dt><kbd>[</kbd> <kbd>]</kbd> <kbd>⌫</kbd></dt><dd>loop in, loop out, clear the loop</dd>
+          <dt><kbd>1</kbd>–<kbd>6</kbd></dt><dd>select a stem</dd>
+          <dt><kbd>Tab</kbd></dt><dd>move focus; the focused stem is the selected one</dd>
+          <dt><kbd>M</kbd> <kbd>S</kbd></dt><dd>mute or solo the selected stem</dd>
+          <dt><kbd>−</kbd> <kbd>+</kbd></dt><dd>selected stem level, 5% a step</dd>
+          <dt><kbd>,</kbd> <kbd>.</kbd></dt><dd>practice speed down and up, 5% a step</dd>
+          <dt><kbd>V</kbd> <kbd>G</kbd></dt><dd>mute or unmute the vocals, the guitar stem</dd>
+          <dt><kbd>L</kbd> <kbd>T</kbd> <kbd>F</kbd></dt><dd>show or hide the lyrics, the lane, the fretboard</dd>
+          <dt><kbd>?</kbd> <kbd>Esc</kbd></dt><dd>open and close this list</dd>
+        </dl>
+        <p class="muted small-copy">
+          Two deliberate differences from the terminal surface. <kbd>Tab</kbd> is the browser's
+          focus key and can never be a shortcut, so selection follows focus instead of cycling.
+          <kbd>Q</kbd> is unbound: a browser tab is not this app's to close.
+        </p>
+      </div>
+    </div>
 
     <footer class="site-footer">
       <span>Kilix Playalong · local-first practice</span>
