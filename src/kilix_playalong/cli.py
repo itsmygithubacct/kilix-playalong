@@ -145,7 +145,16 @@ def _resumed_source(
         return {}
     stored = manifest["source"].get("url")
     if isinstance(stored, str) and stored:
-        return {"url": stored}
+        # Stripped: a project made before `validate_url` refused unprintable
+        # characters can hold "\rhttps://..." from a pasted link, and handing
+        # that back verbatim fails the gate and makes the project unresumable.
+        # Stripping keeps the property the gate exists for -- `urlsplit` drops a
+        # newline when parsing but not from the string handed on, so the gate
+        # must see exactly what a provider will get, and it does: the stripped
+        # value is what is validated and what is used. The fingerprint still
+        # matches because `_verify_resume_source` compares the recorded URL and
+        # this one with surrounding whitespace removed.
+        return {"url": stored.strip()}
     if manifest["stages"]["download"]["status"] == "done":
         return {}
     raise InvalidInputError("this project needs its source link to finish acquiring: pass it")

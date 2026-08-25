@@ -308,12 +308,12 @@ def _normalize_words(words: Sequence[LyricWord], start: float, end: float) -> li
             continue
         raw_start = word.get("start")
         raw_end = word.get("end")
-        if not isinstance(raw_start, int | float) or not isinstance(raw_end, int | float):
+        start_value = _finite_number(raw_start)
+        end_value = _finite_number(raw_end)
+        if start_value is None or end_value is None:
             continue
-        if not math.isfinite(float(raw_start)) or not math.isfinite(float(raw_end)):
-            continue
-        word_start = min(max(float(raw_start), cursor), end)
-        word_end = min(max(float(raw_end), word_start), end)
+        word_start = min(max(start_value, cursor), end)
+        word_end = min(max(end_value, word_start), end)
         result.append({"start": round(word_start, 3), "end": round(word_end, 3), "text": text})
         cursor = word_start
     return result
@@ -847,13 +847,17 @@ def _json_cues(value: object) -> list[LyricCue]:
         end = item.get("end")
         text = item.get("text")
         words_value = item.get("words", [])
+        # Through `_finite_number` rather than isinstance-then-float: a JSON
+        # integer of four hundred digits satisfies `int | float` and overflows
+        # the conversion, and OverflowError is not a PlayalongError, so it left
+        # here as a traceback. Routing every reading of a number in this module
+        # through the one helper is also what keeps that guard from having to
+        # be repeated at each of the four places a cue carries a time.
+        start_value = _finite_number(start)
+        end_value = _finite_number(end)
         if (
-            isinstance(start, bool)
-            or not isinstance(start, int | float)
-            or isinstance(end, bool)
-            or not isinstance(end, int | float)
-            or not math.isfinite(float(start))
-            or not math.isfinite(float(end))
+            start_value is None
+            or end_value is None
             or not isinstance(text, str)
             or not isinstance(words_value, list)
         ):
@@ -865,24 +869,18 @@ def _json_cues(value: object) -> list[LyricCue]:
             word_start = word.get("start")
             word_end = word.get("end")
             word_text = word.get("text")
-            if (
-                isinstance(word_start, bool)
-                or not isinstance(word_start, int | float)
-                or isinstance(word_end, bool)
-                or not isinstance(word_end, int | float)
-                or not math.isfinite(float(word_start))
-                or not math.isfinite(float(word_end))
-                or not isinstance(word_text, str)
-            ):
+            word_start_value = _finite_number(word_start)
+            word_end_value = _finite_number(word_end)
+            if word_start_value is None or word_end_value is None or not isinstance(word_text, str):
                 raise InvalidInputError("lyrics JSON contains an invalid timed word")
             words.append(
                 {
-                    "start": float(word_start),
-                    "end": float(word_end),
+                    "start": word_start_value,
+                    "end": word_end_value,
                     "text": word_text,
                 }
             )
-        cues.append({"start": float(start), "end": float(end), "text": text, "words": words})
+        cues.append({"start": start_value, "end": end_value, "text": text, "words": words})
     return cues
 
 
@@ -1061,7 +1059,13 @@ def _finite_number(value: object) -> float | None:
 
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    number = float(value)
+    # A JSON integer of four hundred digits satisfies the isinstance test and
+    # then overflows the conversion. OverflowError is not a PlayalongError, so
+    # without this it leaves cli.py as a traceback rather than a message.
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -1119,7 +1123,13 @@ def load_lyrics_document(
     if suffix == ".json":
         try:
             value = json.loads(raw)
-        except json.JSONDecodeError as error:
+        # RecursionError, because json.loads descends one Python frame per
+        # nesting level and a document is only bounded here by its byte count:
+        # MAX_LYRICS_BYTES of "[" is thousands of levels deep. It is not a
+        # subclass of JSONDecodeError, and it is not a PlayalongError, so it
+        # left cli.py as a traceback. RecursionError inherits RuntimeError, so
+        # it is named rather than caught by breadth.
+        except (json.JSONDecodeError, RecursionError) as error:
             raise InvalidInputError("lyrics JSON is malformed") from error
         if not isinstance(value, dict) or value.get("schema") != LYRICS_SCHEMA:
             raise InvalidInputError("lyrics JSON has an unsupported schema")

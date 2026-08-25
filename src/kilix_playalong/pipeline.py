@@ -1661,8 +1661,31 @@ def _verify_resume_source(manifest: ProjectManifest, options: PipelineOptions) -
     if isinstance(recorded_kind, str) and recorded_kind != spec.kind:
         raise InvalidInputError("resume source is not the kind this project was created from")
     max_duration = options.max_duration
-    if manifest["source"].get("url_sha256") != _source_identity(spec, max_duration=max_duration):
-        raise InvalidInputError("resume source does not match the project's source fingerprint")
+    recorded = manifest["source"].get("url_sha256")
+    if recorded == _source_identity(spec, max_duration=max_duration):
+        return
+    # The digests differ. Before refusing, ask the question this check is
+    # actually for -- "is this a different song?" -- rather than the byte
+    # question. A project created before `validate_url` refused unprintable
+    # characters can hold a URL with a stray carriage return from a pasted
+    # link; its recorded digest covers that raw string, so the stripped URL a
+    # current build produces can never match it, and the project becomes
+    # unresumable through no fault of the user. A re-pasted URL carrying a
+    # trailing space is the same situation arriving fresh.
+    #
+    # Comparing the recorded URL to the offered one with surrounding
+    # whitespace removed answers the real question and moves no digest: the
+    # recording is untouched, and nothing is fetched with the loosened value --
+    # `youtube.validate_url` has already gated the string the spec carries, and
+    # that is the string any provider is handed.
+    recorded_url = manifest["source"].get("url")
+    if (
+        isinstance(spec, YouTubeSource)
+        and isinstance(recorded_url, str)
+        and recorded_url.strip() == spec.url.strip()
+    ):
+        return
+    raise InvalidInputError("resume source does not match the project's source fingerprint")
 
 
 def resume(

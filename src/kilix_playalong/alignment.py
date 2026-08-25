@@ -296,7 +296,7 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
@@ -938,7 +938,17 @@ def _build_reference(lines: Sequence[str]) -> _Reference:
 def _finite(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    number = float(value)
+    # float() on an int is exact and unbounded in Python, so a JSON integer of
+    # four hundred digits passes the isinstance test and then raises
+    # OverflowError -- not a PlayalongError, so it reaches the user as a
+    # traceback. json.loads produces exactly such an int from a document a user
+    # supplied. The same guard is in lyrics._finite_number for the same reason;
+    # they are not shared because this module deliberately knows nothing about
+    # files, and the module that would host the helper is the one that does.
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -1840,7 +1850,19 @@ def hypothesis_from_cues(cues: Sequence[LyricCue]) -> list[LyricWord]:
             continue
         end = max(start, end)
         before = len(words)
-        for word in cue.get("words") or []:
+        # `words` is checked the way `start`, `end` and `text` already are.
+        # Nothing inside this package delivers a non-list today -- lyrics
+        # rejects one and the pipeline's only call site feeds cues straight
+        # from load_lyrics_document -- so this closes a hole in a defence the
+        # function already mounts for its other three fields, rather than a
+        # traceback anyone can reach now. A str is excluded on purpose: it is
+        # iterable, and iterating it would hand .get() to a character.
+        raw_words = cue.get("words")
+        if isinstance(raw_words, str) or not isinstance(raw_words, Sequence):
+            raw_words = []
+        for word in raw_words:
+            if not isinstance(word, Mapping):
+                continue
             text = word.get("text", "")
             word_start = _finite(word.get("start"))
             word_end = _finite(word.get("end"))

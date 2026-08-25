@@ -25,6 +25,7 @@ from kilix_playalong.pipeline import (
     PipelineOptions,
     _LyricsPlan,
     _recorded_whisper_receipt,
+    _verify_resume_source,
     create_project,
     list_projects,
     resume,
@@ -32,7 +33,7 @@ from kilix_playalong.pipeline import (
 )
 from kilix_playalong.providers import transcription
 from kilix_playalong.runner import CommandResult
-from kilix_playalong.state import load_manifest, save_manifest
+from kilix_playalong.state import load_manifest, new_manifest, save_manifest
 from kilix_playalong.tablature import STANDARD_TUNING
 from kilix_playalong.types import ProjectManifest
 from kilix_playalong.util import (
@@ -2056,3 +2057,38 @@ def test_a_lyrics_file_that_will_not_parse_reports_itself(
 
     assert whisper_models == []
     assert load_manifest(project_dir)["stages"]["lyrics"]["status"] == "error"
+
+
+def test_a_project_whose_recorded_link_carries_a_stray_control_character_still_resumes() -> None:
+    """A real project on this machine held "\\rhttps://youtube.com/watch?v=..".
+
+    It was created when `validate_url` still accepted an unprintable character,
+    and the strict gate that replaced it then refused every resume: the recorded
+    fingerprint covers the raw string, so a stripped URL could never match it and
+    an unstripped one could never pass the gate. The project worked for days and
+    then could not be resumed at all.
+
+    The check exists to refuse a resume that names a *different song*, so it now
+    asks that question with surrounding whitespace removed. Nothing is rewritten
+    and no digest moves; the gate still sees exactly the string a provider would
+    be handed.
+    """
+
+    legacy_url = "\rhttps://youtube.com/watch?v=abcdef12345"
+    manifest = new_manifest(
+        "song-legacy00000001",
+        url_sha256=sha256_text(legacy_url),
+        rights_statement="confirmed",
+    )
+    manifest["source"].update({"kind": "youtube", "url": legacy_url})
+
+    # The stripped URL a current build produces has a different digest ...
+    stripped = legacy_url.strip()
+    assert sha256_text(stripped) != manifest["source"]["url_sha256"]
+
+    # ... and is nonetheless accepted as the same song.
+    _verify_resume_source(manifest, PipelineOptions(url=stripped))
+
+    # A genuinely different link is still refused.
+    with pytest.raises(InvalidInputError, match="fingerprint"):
+        _verify_resume_source(manifest, PipelineOptions(url="https://youtu.be/zzzzzzzzzzz"))

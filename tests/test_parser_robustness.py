@@ -36,17 +36,18 @@ decayed into one that every parser refuses at the first gate still passes the
 "raise PlayalongError" assertion while testing nothing behind that gate, and
 the floors are what makes that decay a failure instead.
 
-**Known defects.** Five distinct escapes were found and none can be fixed from
-here (this file owns no source module). Six ``xfail(strict)`` tests at the
-bottom pin them with their exact reproducers -- the overflow in
-``alignment._finite`` gets two, because it is reachable through two entry
-points. Four of the five are reached by the loops on their own and are listed
-in ``_KNOWN_DEFECTS`` so the loops stay green while the defect is live; the
-fifth is kept out of the corpus and pinned only by its own test, for the reason
-given where the corpus excludes it. That tolerance is keyed on (entry point,
-exception type) and is therefore blunt: a *second* defect at the same entry
-point raising the same type would be absorbed by it. When an xfail test flips
-to XPASS, its entry here goes with it.
+**Escapes found, and closed.** Five distinct escapes were found when this
+suite was written -- a deeply nested lyrics document recursing out of
+``json.loads``, a 400-digit integer overflowing every ``float()`` that followed
+an ``isinstance(x, int | float)`` test, a lone surrogate out of a probe
+document that no encoder can write, and an unchecked ``words`` field -- and all
+five were fixed on 2026-08-25. The tests at the bottom are now ordinary tests,
+and ``_KNOWN_DEFECTS`` is empty.
+
+Two of them are refused; four drop the one bad value instead, which is the
+other half of the contract above and the better half here: dropping a corrupt
+timestamp costs one word, while raising would send ``_apply_alignment`` to its
+fallback and cost every word its timing.
 """
 
 from __future__ import annotations
@@ -91,25 +92,12 @@ _T = TypeVar("_T")
 #: loops stay green, with the reproducer pinned by the named test. Keyed by the
 #: label passed to `_refuse_or_return`.
 _KNOWN_DEFECTS: dict[str, tuple[type[Exception], ...]] = {
-    # RecursionError: `json.loads` recurses once per nesting level and
-    # `load_lyrics_document` catches only JSONDecodeError --
-    # test_deeply_nested_lyrics_json_is_refused. The loop reaches it on its own:
-    # the huge-repeat mutator can repeat a `[{` slice thousands of times.
-    # OverflowError: `_json_cues` does `float(start)` after an
-    # `isinstance(start, int | float)` test, and an integer of 400 digits passes
-    # the test and overflows the call --
-    # test_a_lyrics_json_integer_too_large_for_a_float_is_refused.
-    "lyrics.load_lyrics_document[json]": (RecursionError, OverflowError),
-    # `_extract_lyrics` measures a lyric tag with `value.encode("utf-8")`, which
-    # a lone surrogate out of the probe document cannot survive --
-    # test_a_probe_document_carrying_a_lone_surrogate_lyrics_tag_is_refused.
-    "source.read_metadata": (UnicodeEncodeError,),
-    # `alignment._finite` calls `float(value)` on anything numeric, so the same
-    # 400-digit integer overflows there --
-    # test_an_alignment_timestamp_too_large_for_a_float_is_refused.
-    "alignment.align_lines": (OverflowError,),
-    "alignment.align_reference_text": (OverflowError,),
-    "alignment.hypothesis_from_cues": (OverflowError,),
+    # Empty, and it must stay empty unless something is genuinely being
+    # tolerated. The five escapes this suite found were fixed on 2026-08-25 and
+    # their entries went with them, as the note at the top of this file
+    # requires. The tolerance is keyed on (entry point, exception type) and is
+    # blunt: an entry left here after its defect is closed would silently
+    # absorb the *next* defect that leaves the same entry point the same way.
 }
 
 # --------------------------------------------------------------------------- #
@@ -1156,36 +1144,33 @@ def test_the_alignment_cell_ceiling_refuses_a_pair_past_it() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Defects found. None is fixable from this file, which owns no source module.
+# The six escapes this suite found, now closed.
+#
+# Each was a parser leaving through an exception that is not a PlayalongError,
+# which `cli.py` does not catch and a user therefore meets as a traceback. Two
+# are refused outright; four are dropped, because the contract this file states
+# is "a well-formed result OR a PlayalongError", and for these four dropping the
+# one bad value is the better half of it: `_prepare_hypothesis` exists to "drop
+# what cannot be trusted", and `pipeline._apply_alignment` answers an
+# InvalidInputError by falling back to evenly spread timing -- so raising over a
+# single corrupt timestamp would throw away every other word's timing to punish
+# it. These tests therefore assert what the fix does, not the raise the original
+# reproducers guessed at.
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: load_lyrics_document catches only json.JSONDecodeError, and "
-        "json.loads recurses once per nesting level, so a deeply nested "
-        "lyrics.json raises RecursionError -- a traceback out of cli.py"
-    ),
-)
 def test_deeply_nested_lyrics_json_is_refused(tmp_path: Path) -> None:
+    """`json.loads` recurses once per nesting level; the byte bound is no depth bound."""
+
     path = tmp_path / "deep.json"
-    payload = '{"schema":"' + LYRICS_SCHEMA + '","cues":' + "[" * 20000 + "]" * 20000 + "}"
-    path.write_text(payload)
+    path.write_text("[" * 40000 + "]" * 40000)
     with pytest.raises(PlayalongError):
         lyrics_module.load_lyrics_document(path, duration=10.0)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: _json_cues tests isinstance(start, int | float) and then calls "
-        "float(start); a JSON integer of 400 digits passes the first and "
-        "overflows the second. source._positive_seconds documents closing "
-        "exactly this door for durations; the lyric cue path never did"
-    ),
-)
 def test_a_lyrics_json_integer_too_large_for_a_float_is_refused(tmp_path: Path) -> None:
+    """A 401-digit integer satisfies `int | float` and overflows the conversion."""
+
     path = tmp_path / "huge.json"
     path.write_text(
         '{"schema":"'
@@ -1198,63 +1183,52 @@ def test_a_lyrics_json_integer_too_large_for_a_float_is_refused(tmp_path: Path) 
         lyrics_module.load_lyrics_document(path, duration=10.0)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: source._extract_lyrics measures a lyric tag with "
-        "value.encode('utf-8'), which raises UnicodeEncodeError on the lone "
-        "surrogate json.loads produces from a \\ud800 escape in ffprobe's output"
-    ),
-)
-def test_a_probe_document_carrying_a_lone_surrogate_lyrics_tag_is_refused() -> None:
+def test_a_probe_document_carrying_a_lone_surrogate_lyrics_tag_is_dropped() -> None:
+    """No encoder can write a lone surrogate, and ffprobe's JSON can carry one.
+
+    The tag is declined rather than the file refused: a container whose lyrics
+    tag is unreadable is still a playable container, and the intake's job is the
+    audio.
+    """
+
     document = json.loads('{"format":{"tags":{"lyrics":"\\ud800bad"}},"streams":[]}')
-    with pytest.raises(PlayalongError):
-        source.read_metadata(Path("/library/song.mp3"), document, 10.0)
+    metadata = source.read_metadata(Path("/library/song.mp3"), document, 10.0)
+    assert metadata.lyrics is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: alignment._finite calls float(value) on anything numeric, so a "
-        "400-digit integer timestamp overflows in align_lines and in "
-        "hypothesis_from_cues alike"
-    ),
-)
-def test_an_alignment_timestamp_too_large_for_a_float_is_refused() -> None:
+def test_an_alignment_timestamp_too_large_for_a_float_is_dropped() -> None:
+    """The word goes; the alignment does not."""
+
     huge = int("1" + "0" * 400)
-    words: list[dict[str, object]] = [{"start": huge, "end": 1.0, "text": "hello"}]
-    with pytest.raises(PlayalongError):
-        alignment.align_lines(["hello world"], _as_words(words))
+    words: list[dict[str, object]] = [
+        {"start": huge, "end": 1.0, "text": "hello"},
+        {"start": 0.5, "end": 1.0, "text": "world"},
+    ]
+    result = alignment.align_lines(["hello world"], _as_words(words))
+    assert result is not None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: hypothesis_from_cues type-checks `start`, `end` and `text` on "
-        "the cue mapping it is handed and iterates `words` unchecked, so a "
-        "non-list there is a bare TypeError. Narrower than the others: no path "
-        "inside this package delivers one -- `lyrics._json_cues` rejects a "
-        "non-list `words`, and the pipeline's only call site feeds it cues from "
-        "`load_lyrics_document` -- so this is a hole in a defence the function "
-        "mounts for its other three fields, not a traceback reachable today"
-    ),
-)
-def test_a_cue_whose_words_field_is_not_a_list_is_refused() -> None:
+def test_a_cue_timestamp_too_large_for_a_float_is_dropped() -> None:
+    """Reached through `hypothesis_from_cues`, which reads a supplied caption track."""
+
+    huge = int("1" + "0" * 400)
+    cues: list[dict[str, object]] = [
+        {"start": huge, "end": 1.0, "text": "hi", "words": []},
+        {"start": 0.0, "end": 1.0, "text": "ok", "words": []},
+    ]
+    words = alignment.hypothesis_from_cues(_as_cues(cues))
+    assert all(math.isfinite(word["start"]) for word in words)
+    assert not any(word["start"] > 1e6 for word in words)
+
+
+def test_a_cue_whose_words_field_is_not_a_list_is_dropped() -> None:
+    """`words` is now checked the way `start`, `end` and `text` already were.
+
+    No path inside this package delivers a non-list -- `lyrics._json_cues`
+    rejects one and the pipeline feeds cues straight from
+    `load_lyrics_document` -- so this closed a hole in a defence the function
+    already mounted for its other three fields, not a live traceback.
+    """
+
     cues: list[dict[str, object]] = [{"start": 0.0, "end": 1.0, "text": "hi", "words": 7}]
-    with pytest.raises(PlayalongError):
-        alignment.hypothesis_from_cues(_as_cues(cues))
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "DEFECT: the same float(value) in alignment._finite, reached through "
-        "hypothesis_from_cues, which reads cue timings straight off a caption "
-        "track a user supplied"
-    ),
-)
-def test_a_cue_timestamp_too_large_for_a_float_is_refused() -> None:
-    huge = int("1" + "0" * 400)
-    cues: list[dict[str, object]] = [{"start": huge, "end": 1.0, "text": "hi", "words": []}]
-    with pytest.raises(PlayalongError):
-        alignment.hypothesis_from_cues(_as_cues(cues))
+    assert alignment.hypothesis_from_cues(_as_cues(cues)) is not None

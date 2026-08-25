@@ -756,7 +756,17 @@ def _extract_lyrics(
         parsed = embedded_tag_key(key)
         if parsed is None:
             continue
-        if len(value.encode("utf-8")) > MAX_EMBEDDED_LYRICS_BYTES:
+        # ffprobe's JSON can carry a \ud800 escape, and json.loads turns that
+        # into a lone surrogate that no UTF-8 encoder will accept. Measuring
+        # the bound is the first thing that touches the bytes, so without this
+        # a crafted container reaches the user as a UnicodeEncodeError rather
+        # than as a tag this build declined to read.
+        try:
+            measured = len(value.encode("utf-8"))
+        except UnicodeEncodeError:
+            ignored.append(original)
+            continue
+        if measured > MAX_EMBEDDED_LYRICS_BYTES:
             ignored.append(original)
             continue
         text = _clean_lyrics(value)
