@@ -45,6 +45,7 @@ import re
 import shutil
 import uuid
 from collections.abc import Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
@@ -100,7 +101,7 @@ from .state import (
 )
 from .tablature import STANDARD_TUNING, infer_fingerings, render_ascii, tuning_labels, write_tab
 from .text import MAX_DISPLAY_TEXT, printable_line
-from .types import AudioTrack, ProjectManifest
+from .types import AudioTrack, ProjectManifest, Stage
 from .util import (
     canonical_json,
     private_write,
@@ -591,10 +592,27 @@ class Pipeline:
         if value and value not in self._learned_secrets:
             self._learned_secrets.append(value)
 
-    def _invalidate_from(self, name: str) -> None:
+    def _invalidate_from(self, name: str) -> tuple[dict[str, Stage], ...]:
+        """Wipe every stage below `name`, returning what was wiped.
+
+        The return value is the price of the wipe being reversible. Invalidation
+        is persisted *before* the stage that caused it runs, so a stage that then
+        fails used to leave the project holding neither its old records nor any
+        new ones -- stems, lyrics, MIDI, tab and printable all still on disk,
+        with a manifest that no longer admitted to any of them. Widening
+        `--max-duration-minutes` on a finished project whose video had since been
+        taken down did exactly that: the acquisition stage re-keyed, wiped
+        everything below it, and only then discovered it could not re-fetch.
+
+        The records handed back are deep copies, so the caller can put them back
+        after the manifest has been mutated and saved.
+        """
+
         offset = STAGE_NAMES.index(name)
+        wiped: list[dict[str, Stage]] = []
         for later in STAGE_NAMES[offset + 1 :]:
             stage = self.manifest["stages"][later]
+            wiped.append({later: deepcopy(stage)})
             stage["status"] = "pending"
             stage["started_at"] = None
             stage["finished_at"] = None
@@ -602,6 +620,25 @@ class Pipeline:
             stage["error"] = None
             stage.pop("note", None)
             stage.pop("fingerprint", None)
+        return tuple(wiped)
+
+    def _restore(self, wiped: tuple[dict[str, Stage], ...]) -> None:
+        """Put back what a failed re-run had no right to take.
+
+        Only the stages *below* the one that failed. That stage keeps its error,
+        because the user asked for it to run and needs to see why it did not.
+        The ones below it were never attempted: their artifacts are untouched on
+        disk and still describe the same inputs they always did, since the stage
+        that would have replaced those inputs is precisely the one that failed.
+
+        A restored ``done`` is not taken on trust either -- `stage_is_current`
+        re-digests every artifact before it accepts one, so a record put back
+        over missing or altered bytes simply is not current on the next resume.
+        """
+
+        for entry in wiped:
+            for name, stage in entry.items():
+                self.manifest["stages"][name] = deepcopy(stage)
 
     def _run_stage(
         self,
@@ -650,7 +687,7 @@ class Pipeline:
                 # answer a resume is usually being run to see.
                 self.progress(name, "cached", self.manifest["stages"][name].get("note", ""))
                 return
-        self._invalidate_from(name)
+        wiped = self._invalidate_from(name)
         begin_stage(self.manifest, name, provider, fingerprint=fingerprint)
         self._save()
         self.progress(name, "running", "")
@@ -662,6 +699,10 @@ class Pipeline:
         except Exception as error:
             message = public_error(str(error), secrets=self._secrets())
             recorded = message or error.__class__.__name__
+            # Before the failure is recorded, not after: `fail_stage` saves, and
+            # the whole point is that the save which lands must already hold the
+            # stages this run had no business disturbing.
+            self._restore(wiped)
             fail_stage(self.manifest, name, recorded)
             self._save()
             # The same string `fail_stage` just recorded, so the line a user watches and

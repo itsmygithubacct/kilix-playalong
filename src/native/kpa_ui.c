@@ -95,6 +95,8 @@
  * the same instrument in two different tempers.
  */
 #define KPA_UI_HAND 0x002EAA75u
+/* The capo: a dark rubber-and-metal clamp, distinct from bone and from wood. */
+#define KPA_FB_CAPO 0x00303038u
 
 /* ------------------------------------------------------------ geometry */
 
@@ -1505,6 +1507,37 @@ static void draw_neck_furniture(sr_canvas *canvas, const kpa_fb_geom *geometry)
 }
 
 /*
+ * The capo.  It clamps across every string just behind a fret, so it is drawn
+ * between the wire and the fret before it, over the strings rather than under
+ * them -- a capo sits on top of the strings and that is what makes it read as
+ * a clamp instead of another fret wire.
+ *
+ * Without this the capo was audible and invisible: `notes_below_capo` counted
+ * the positions it makes unplayable and `draw_sounding_note` crossed them out
+ * where they fell, but nothing on the neck said where the thing causing that
+ * actually was, so the crossed notes had no visible cause.
+ */
+static void draw_capo(sr_canvas *canvas, const kpa_fb_geom *geometry,
+                      uint32_t capo)
+{
+    const float wire = neck_wire_x(geometry, capo);
+    const float previous = neck_wire_x(geometry, capo - 1u);
+    const float centre = (wire + previous) * 0.5f;
+    const float span = wire > previous ? wire - previous : previous - wire;
+    const float width = span * 0.42f < 4.0f ? 4.0f : span * 0.42f;
+    const float board_h = (float)(geometry->y1 - geometry->y0);
+    const float pad = geometry->string_pitch * 0.35f;
+
+    if (capo == 0u || capo > geometry->max_fret) return;
+    sr_fill_rect(canvas, centre - width * 0.5f, (float)geometry->y0 - pad,
+                 width, board_h + pad * 2.0f, KPA_FB_CAPO, 0.92f);
+    /* A highlight down the near edge: flat colour at this size reads as a
+     * painted stripe rather than as something clamped over the board. */
+    sr_fill_rect(canvas, centre - width * 0.5f, (float)geometry->y0 - pad,
+                 width * 0.28f, board_h + pad * 2.0f, KPA_FB_BONE, 0.35f);
+}
+
+/*
  * The five-fret box over where the hand is.  Everything about it comes from
  * kpa_fret_hand_at, including the fact that it never covers the nut: an open
  * string needs no hand and does not pull the box down to the first fret.
@@ -1592,11 +1625,17 @@ static void draw_sounding_note(sr_canvas *canvas, const kpa_ui_model *model,
     }
     /*
      * ...and a standing wave from there to the end of the board, with a node
-     * at each end, drawn as twelve segments.  It is a function of
-     * model->position and of nothing else, so a paused player sees a still
-     * string - which is correct: a paused guitar is not vibrating.
+     * at each end, drawn as twelve segments.  It is a function of the model
+     * and of nothing else, so compose stays pure.
+     *
+     * Paused, the amplitude is zero rather than frozen.  Freezing it was
+     * "correct" in the sense that a still picture of a vibrating string is a
+     * displaced string -- but a still frame is exactly what a paused player is
+     * looking at, and every ringing string sitting at some fixed offset from
+     * its rest position reads as a warped neck, not as a held note.  A paused
+     * guitar is not vibrating, so the honest amplitude is none.
      */
-    phase = sinf(6.2831853f * 6.0f * (float)when);
+    phase = model->playing ? sinf(6.2831853f * 6.0f * (float)when) : 0.0f;
     for (segment = 0; segment < 12; ++segment) {
         const float t0 = (float)segment / 12.0f;
         const float t1 = (float)(segment + 1) / 12.0f;
@@ -1945,6 +1984,9 @@ static void draw_fretboard(sr_canvas *canvas, const kpa_ui_model *model,
         if (frame.ring[api] == NULL) continue;
         draw_sounding_note(canvas, model, &geometry, frame.ring[api], api,
                            when);
+    }
+    if (model->capo > 0u) {
+        draw_capo(canvas, &geometry, (uint32_t)model->capo);
     }
     if (layout->ramp_h > 0) {
         draw_ramp(canvas, model, &geometry, &frame, layout);

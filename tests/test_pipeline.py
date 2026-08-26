@@ -2092,3 +2092,61 @@ def test_a_project_whose_recorded_link_carries_a_stray_control_character_still_r
     # A genuinely different link is still refused.
     with pytest.raises(InvalidInputError, match="fingerprint"):
         _verify_resume_source(manifest, PipelineOptions(url="https://youtu.be/zzzzzzzzzzz"))
+
+
+def test_a_failed_reacquisition_leaves_a_finished_project_exactly_as_it_was(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The link arm's key holds the duration bound, and a failed re-run must not cost the project.
+
+    The file arm was fixed by dropping the bound from its key. The link arm cannot
+    be fixed that way: moving that key re-downloads every project on the machine,
+    which destroys exactly the ones whose video has since gone -- the same harm,
+    delivered to everyone at once instead of to one person on a widened setting.
+
+    So the invariant is the fix. `_invalidate_from` wipes every stage below the one
+    re-running and the manifest is saved before the action is attempted, so a stage
+    that then fails used to leave stems, lyrics, MIDI, tab and printable on disk
+    with a manifest admitting to none of them. The stages below a failure were
+    never attempted; their artifacts are untouched and still describe the inputs
+    they always did, because the stage that would have replaced those inputs is the
+    one that failed. They are put back.
+    """
+
+    calls, _providers = _install_providers(monkeypatch)
+    _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
+    _cache_whisper_model("small")
+    options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
+    project_dir, _manifest = run_new(options)
+
+    finished = load_manifest(project_dir)
+    assert all(stage["status"] == "done" for stage in finished["stages"].values())
+    downstream = {
+        name: dict(finished["stages"][name])
+        for name in ("normalize", "separate", "lyrics", "tablature", "export")
+    }
+
+    # The video is gone. Widening the limit re-keys acquisition, so it re-runs.
+    def gone(*_args: object, **_kwargs: object) -> tuple[Path, list[Path], dict[str, object]]:
+        raise ProviderFailedError("the video is no longer available")
+
+    monkeypatch.setattr("kilix_playalong.providers.youtube.download", gone)
+
+    with pytest.raises(ProviderFailedError):
+        resume(
+            project_dir,
+            PipelineOptions(max_duration=45 * 60, rights_confirmed=True),
+        )
+
+    after = load_manifest(project_dir)
+    assert after["stages"]["download"]["status"] == "error"
+    for name, before in downstream.items():
+        assert after["stages"][name]["status"] == "done", f"{name} was lost"
+        assert after["stages"][name]["artifacts"] == before["artifacts"], name
+        assert after["stages"][name].get("fingerprint") == before.get("fingerprint"), name
+
+    # And the artifacts the restored records point at are really still there.
+    for name in downstream:
+        for artifact in after["stages"][name]["artifacts"]:
+            assert (project_dir / artifact["path"]).is_file()
