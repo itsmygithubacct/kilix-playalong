@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="{{TITLE}} guitar practice sheet: lyrics, notes, tablature, and section loops.">
+  <title>{{TITLE}} · Guitar Songbook</title>
+  <style>/* SONGBOOK_CSS */</style>
+</head>
+<body>
+  <header class="topbar no-print">
+    <a class="brand" href="#song-top" aria-label="Songbook, top of song"><span class="brand-mark" aria-hidden="true">♬</span> SONGBOOK<span class="brand-sub">a place to play</span></a>
+    <button class="button quiet" id="print">Print / Save PDF <span aria-hidden="true">↗</span></button>
+  </header>
+  <div class="shell" id="song-top">
+    <aside class="sidebar no-print" aria-label="Song navigation">
+      <div class="eyebrow">THE ARRANGEMENT</div>
+      <nav id="section-nav" aria-label="Song sections"></nav>
+      <button class="button quiet small" id="edit-sections">Edit section markers</button>
+      <div class="sidebar-note">Pick a section to jump in.<br>Loop it until it feels right.</div>
+      <div class="sidebar-footer"><span>♩</span> {{TUNING}}<br><small>Tuning · six strings</small></div>
+    </aside>
+    <main id="main">
+      <section class="song-heading" aria-labelledby="song-title">
+        <div class="eyebrow"><span class="live-dot"></span> GUITAR / LYRICS & TAB</div>
+        <h1 id="song-title">{{TITLE}}</h1>
+        <p class="artist">{{ARTIST}}</p>
+        <div class="song-facts"><span>Tuning <strong>{{TUNING}}</strong></span><span id="song-duration"></span><span class="draft-badge">Practice draft</span></div>
+        <p class="intro">Take it a phrase at a time. Follow the words, see the notes, and play along.</p>
+      </section>
+      <div class="view-controls no-print" aria-label="Chart options">
+        <div class="toggle-group"><label><input id="show-notes" type="checkbox" checked> Note names</label><label><input id="show-chords" type="checkbox" checked> Chord labels</label><label><input id="follow" type="checkbox" checked> Follow playback</label></div>
+        <div class="text-size"><span>Tab size</span><button id="smaller" aria-label="Smaller tab text">−</button><button id="larger" aria-label="Larger tab text">+</button></div>
+      </div>
+      <div class="reading-key"><span class="sample-note"><b>4</b><small>F♯</small></span><span><strong>Fret number above, note name below.</strong> The highest string is the top line. <span id="play-hint">Click any fret to hear that moment.</span></span></div>
+      <div id="chart"></div>
+      <footer class="page-footer">
+        <p><strong>About this transcription.</strong> Notes and chord labels come from the detected guitar part. The separation, fingering, lyrics, and section boundaries are estimates; check them against the recording. The source tab omitted {{OMITTED}} detected notes during grouping and fingering.</p>
+        <p class="no-print">Use a lyric line’s Edit button or Edit section markers to make corrections. Changes are saved in this browser when storage is available.</p>
+        <div class="footer-actions no-print"><button class="button quiet small" id="export-edits">Download corrections</button><label class="button quiet small import-button">Import corrections<input id="import-edits" type="file" accept="application/json,.json"></label><button class="button quiet small" id="reset-edits">Reset corrections</button><span id="save-status" role="status"></span></div>
+      </footer>
+    </main>
+  </div>
+  <div class="transport no-print" role="region" aria-label="Practice player">
+    <audio id="audio" preload="metadata"></audio>
+    <div class="transport-main"><button id="play" class="play-button" aria-label="Play song">▶</button><div class="now-playing"><strong id="now-section"></strong><span id="now-track">{{TITLE}}</span></div><button id="loop" class="button loop-button" aria-pressed="false">↻ Loop section</button></div>
+    <div class="timeline"><span id="elapsed">0:00</span><input id="seek" type="range" min="0" step="0.05" value="0" aria-label="Song position"><span id="total"></span></div>
+    <div class="transport-options"><label>Listen to<select id="track"><option value="mix">Full song</option><option value="guitar">Guitar stem</option></select></label><label>Speed<select id="speed"><option value="0.5">50%</option><option value="0.65">65%</option><option value="0.75">75%</option><option value="0.85">85%</option><option value="1" selected>100%</option></select></label></div>
+    <div id="audio-status" role="status"></div>
+  </div>
+  <dialog id="editor"><form id="edit-form"><div class="dialog-heading"><h2 id="editor-title">Edit lyrics</h2><button type="button" class="icon-button" id="close-editor" aria-label="Close editor">×</button></div><div id="editor-fields"></div><p id="editor-error" role="alert"></p><div class="dialog-actions"><button type="button" class="button quiet" id="cancel-editor">Cancel</button><button type="submit" class="button primary">Save changes</button></div></form></dialog>
+  <script id="song-data" type="application/json">/* SONGBOOK_DATA */</script>
+  <script>/* SONGBOOK_JS */</script>
+</body>
+</html>

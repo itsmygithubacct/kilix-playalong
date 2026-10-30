@@ -328,6 +328,22 @@ def command_serve(arguments: argparse.Namespace) -> int:
     return 0
 
 
+def command_songbook(arguments: argparse.Namespace) -> int:
+    from .songbook import export_songbook
+
+    project_dir = resolve_project(arguments.project)
+    destination = arguments.output or project_dir / "exports" / "songbook"
+    output = export_songbook(
+        project_dir,
+        destination,
+        lyrics_path=arguments.lyrics,
+        arrangement_path=arguments.arrangement,
+        include_audio=not arguments.no_audio,
+    )
+    print(f"Songbook: {output}")
+    return 0
+
+
 def _version(name: str) -> str | None:
     try:
         return importlib.metadata.version(name)
@@ -575,6 +591,20 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=0)
     serve.add_argument("--no-open", action="store_true")
     serve.set_defaults(function=command_serve)
+
+    songbook = commands.add_parser("songbook", help="export an offline lyrics, notes, and tab page")
+    songbook.add_argument("project")
+    songbook.add_argument(
+        "--output", type=Path, help="destination folder (default: project exports/songbook)"
+    )
+    songbook.add_argument("--lyrics", type=Path, help="use a corrected lyrics file for this export")
+    songbook.add_argument(
+        "--arrangement", type=Path, help="JSON with section IDs, labels, kinds, and start times"
+    )
+    songbook.add_argument(
+        "--no-audio", action="store_true", help="export a chart without audio files"
+    )
+    songbook.set_defaults(function=command_songbook)
 
     doctor = commands.add_parser("doctor", help="inspect the locked runtime and optional providers")
     doctor.add_argument("--json", action="store_true")

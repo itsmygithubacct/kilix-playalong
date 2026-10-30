@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import median
@@ -15,6 +16,7 @@ from .util import canonical_json, private_write
 
 STANDARD_TUNING = (40, 45, 50, 55, 59, 64)  # low E to high e
 STANDARD_LABELS = ("E", "A", "D", "G", "B", "e")
+FINGERING_VERSION = 3
 _PITCH_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 
@@ -30,6 +32,8 @@ class Chord:
     start: float
     end: float
     pitches: tuple[int, ...]
+    notes: tuple[Note, ...] = ()
+    omitted_notes: int = 0
 
 
 @dataclass(frozen=True)
@@ -39,7 +43,15 @@ class Fingering:
     local_cost: float
 
 
-def group_notes(notes: list[Note], *, window: float = 0.09, max_polyphony: int = 6) -> list[Chord]:
+def group_notes(
+    notes: list[Note],
+    *,
+    window: float = 0.09,
+    max_polyphony: int = 6,
+    playable_pitches: set[int] | None = None,
+) -> list[Chord]:
+    if not math.isfinite(window) or window < 0 or max_polyphony < 1:
+        raise ValueError("grouping needs a nonnegative window and positive polyphony")
     groups: list[list[Note]] = []
     for note in sorted(notes):
         if groups and note.start - groups[-1][0].start <= window:
@@ -50,6 +62,8 @@ def group_notes(notes: list[Note], *, window: float = 0.09, max_polyphony: int =
     for group in groups:
         strongest: dict[int, Note] = {}
         for note in group:
+            if playable_pitches is not None and note.pitch not in playable_pitches:
+                continue
             previous = strongest.get(note.pitch)
             if previous is None or note.confidence > previous.confidence:
                 strongest[note.pitch] = note
@@ -57,11 +71,16 @@ def group_notes(notes: list[Note], *, window: float = 0.09, max_polyphony: int =
             :max_polyphony
         ]
         selected.sort(key=lambda note: note.pitch)
+        # Keep the onset groups anchored to the original detections even when
+        # all pitches in a group are out of range. Omission counts include them.
+        timed_notes = selected or group
         chords.append(
             Chord(
-                start=min(note.start for note in selected),
-                end=max(note.end for note in selected),
+                start=min(note.start for note in timed_notes),
+                end=max(note.end for note in timed_notes),
                 pitches=tuple(note.pitch for note in selected),
+                notes=tuple(selected),
+                omitted_notes=len(group) - len(selected),
             )
         )
     return chords
@@ -80,8 +99,34 @@ def _fingerings(chord: Chord, tuning: tuple[int, ...], max_fret: int) -> list[Fi
     options = [item for item in options if item]
     if not options:
         return []
-    # Keep the most useful six pitches if inference emitted an impossible chord.
     options = options[-len(tuning) :]
+    confidence = {note.pitch: note.confidence for note in chord.notes}
+    # A colliding or over-wide note must not erase the other notes at that onset.
+    # Try the largest playable subsets first; among equally sized subsets retain
+    # the strongest detected pitches before optimizing their hand positions.
+    for size in range(len(options), 0, -1):
+        candidates: list[Fingering] = []
+        best_confidence = -1.0
+        for subset in itertools.combinations(options, size):
+            strength = sum(confidence.get(choices[0][2], 1.0) for choices in subset)
+            if strength < best_confidence:
+                continue
+            found = _complete_fingerings(subset)
+            if not found:
+                continue
+            if strength > best_confidence:
+                candidates = []
+                best_confidence = strength
+            candidates.extend(found)
+        if candidates:
+            candidates.sort(key=lambda item: (item.local_cost, item.hand, item.positions))
+            return candidates[:192]
+    return []
+
+
+def _complete_fingerings(
+    options: tuple[list[tuple[int, int, int]], ...],
+) -> list[Fingering]:
     candidates: list[Fingering] = []
     for combination in itertools.product(*options):
         strings = [position[0] for position in combination]
@@ -98,8 +143,7 @@ def _fingerings(chord: Chord, tuning: tuple[int, ...], max_fret: int) -> list[Fi
         candidates.append(
             Fingering(tuple(sorted(combination, key=lambda value: value[0])), hand, local)
         )
-    candidates.sort(key=lambda item: (item.local_cost, item.hand, item.positions))
-    return candidates[:192]
+    return candidates
 
 
 def _transition(left: Fingering, right: Fingering) -> float:
@@ -119,9 +163,10 @@ def infer_fingerings(
     tuning: tuple[int, ...] = STANDARD_TUNING,
     max_fret: int = 20,
 ) -> tuple[list[TabEvent], int]:
-    chords = group_notes(notes)
+    playable_pitches = {open_pitch + fret for open_pitch in tuning for fret in range(max_fret + 1)}
+    chords = group_notes(notes, playable_pitches=playable_pitches)
     playable: list[tuple[Chord, list[Fingering]]] = []
-    omitted = 0
+    omitted = sum(chord.omitted_notes for chord in chords)
     for chord in chords:
         candidates = _fingerings(chord, tuning, max_fret)
         if not candidates:
@@ -162,10 +207,12 @@ def infer_fingerings(
             {"string": string, "fret": fret, "pitch": pitch}
             for string, fret, pitch in candidates[selection].positions
         ]
+        kept = {position["pitch"] for position in positions}
+        retained = [note for note in chord.notes if note.pitch in kept]
         events.append(
             {
-                "start": round(chord.start, 3),
-                "end": round(chord.end, 3),
+                "start": min(note.start for note in retained),
+                "end": max(note.end for note in retained),
                 "positions": positions,
             }
         )
@@ -183,7 +230,7 @@ def write_tab(
 ) -> Path:
     document = {
         "schema": TAB_SCHEMA,
-        "provider": "kilix-playalong-fingering-v1",
+        "provider": f"kilix-playalong-fingering-v{FINGERING_VERSION}",
         "source_midi": source_midi,
         "tuning": {
             "midi": list(tuning),
