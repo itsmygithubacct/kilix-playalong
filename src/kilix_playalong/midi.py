@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,7 +37,10 @@ def validate_midi(path: Path) -> int:
 
 
 def load_note_events(path: Path) -> list[Note]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, RecursionError) as error:
+        raise ProviderFailedError("Basic Pitch note output could not be read as JSON") from error
     if not isinstance(value, dict) or not isinstance(value.get("notes"), list):
         raise ProviderFailedError("Basic Pitch note output has an unexpected schema")
     result: list[Note] = []
@@ -44,11 +48,16 @@ def load_note_events(path: Path) -> list[Note]:
         if not isinstance(item, dict):
             continue
         try:
-            start = float(item["start"])
-            end = float(item["end"])
-            pitch = int(item["pitch"])
-            confidence = float(item.get("confidence", 1.0))
-        except (KeyError, TypeError, ValueError):
+            values = (item["start"], item["end"], item["pitch"], item.get("confidence", 1.0))
+            if any(isinstance(number, bool) for number in values):
+                continue
+            start, end, raw_pitch, confidence = map(float, values)
+            if not all(math.isfinite(number) for number in (start, end, raw_pitch, confidence)):
+                continue
+            if not raw_pitch.is_integer() or not 0 <= confidence <= 1:
+                continue
+            pitch = int(raw_pitch)
+        except (KeyError, TypeError, ValueError, OverflowError):
             continue
         if 0 <= start < end and 0 <= pitch <= 127:
             result.append(Note(start, end, pitch, confidence))

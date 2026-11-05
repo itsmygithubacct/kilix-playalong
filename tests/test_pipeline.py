@@ -401,6 +401,27 @@ def test_synthetic_pipeline_resumes_and_invalidates_by_settings(
     assert calls["pitch"] == 2
 
 
+def test_fingering_version_change_reuses_audio_and_pitch_work(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kilix_playalong import pipeline
+
+    calls, _ = _install_providers(monkeypatch)
+    current_version = pipeline.FINGERING_VERSION
+    monkeypatch.setattr(pipeline, "FINGERING_VERSION", current_version - 1)
+    options = PipelineOptions(url=_URL, rights_confirmed=True, whisper_model="small")
+    project, _ = run_new(options)
+    monkeypatch.setattr(pipeline, "FINGERING_VERSION", current_version)
+    statuses: list[tuple[str, str]] = []
+    resume(project, options, progress=lambda name, status, _detail: statuses.append((name, status)))
+    assert ("tablature", "running") in statuses
+    assert ("export", "running") in statuses
+    assert ("transcribe-guitar", "cached") in statuses
+    assert ("lyrics", "cached") in statuses
+    assert calls == {"download": 1, "normalize": 1, "separate": 1, "pitch": 1}
+
+
 def test_lyrics_stage_reruns_when_model_downloads_are_allowed(
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,

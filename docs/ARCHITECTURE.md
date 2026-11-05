@@ -42,6 +42,7 @@ projects/song-…/
   midi/{guitar.mid,guitar-notes.json}
   tab/guitar-tab.json
   exports/{guitar-tab.txt,playalong.html}
+  exports/songbook/{index.html,mix-….mp3,guitar-….mp3}  # on explicit songbook export
 ```
 
 Directories are created with mode `0700` and artifacts with mode `0600`.
@@ -58,6 +59,16 @@ uses dynamic programming across time. The cost favors small fret spans, modest
 hand positions, compact string use, stable pitch-to-string assignment, and small
 position shifts. Identical input and settings therefore produce identical tab.
 
+The v3 provider retains the largest playable subset when a candidate chord has
+string collisions or an excessive span. Equal-sized subsets prefer the strongest
+detected pitches before hand-position optimization. The omission count includes
+duplicate onsets, the six-note cap, out-of-range pitches, and unplaced notes.
+Out-of-range pitches are excluded before the six-note cap while the original
+onset groups are preserved. Event times come from retained notes without rounding
+away short positive spans. The provider version is part of the stage
+fingerprint, so resuming an older project regenerates tablature and printable exports
+while reusing valid upstream artifacts.
+
 This is a practical fingering estimate, not score understanding: bends, slides,
 harmonics, alternate voices, and performance technique are not inferred.
 
@@ -72,6 +83,32 @@ one stalled stem cannot quietly leave the mix out of phase.
 Lyrics and tab are indexed by their start times and selected against that same
 clock. Muting vocals or any individual track changes only its audible level, not
 its timeline, preserving synchronization when it is restored.
+
+## Portable songbook
+
+`songbook.py` validates existing tab and lyric artifacts and renders packaged
+`songbook_assets`. A single HTML file holds chart data, styles, and script; optional
+MP3 files sit beside it. There are no remote assets or services. Audio filenames
+include a source digest. Conversions happen in a staging directory, and the page
+is replaced atomically after both tracks succeed, preserving an existing export
+when FFmpeg fails.
+
+The songbook uses one audio element with pending seek and play intent maintained
+across track changes. Animation frames update highlights for every event whose
+time span contains the audio clock, including notes sustained into another lyric
+row. `timeupdate` supplies a fallback and enforces section or phrase loops. Section edits
+partition events by onset without duplicating them. Boundaries crossing a lyric
+cue repeat the cue in each affected section so neither section loses its words.
+Changing an active section's boundaries moves playback into the new range when
+necessary. A phrase loop is cleared if an edit changes that phrase's range.
+
+Corrections live in browser storage keyed by project and transcript/arrangement
+digest, with JSON import/export. Imports must match that digest; legacy unversioned
+corrections remain downloadable for manual review. All lyric and section text
+uses DOM text nodes. Embedded JSON escapes `<`, and template markers are replaced
+in one pass so user text cannot become HTML or a template instruction.
+The import byte limit is derived from the page's editable cue count and section
+limit, allowing its own exports to round-trip even with escaped or Unicode text.
 
 ## Loopback boundary
 

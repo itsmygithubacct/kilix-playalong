@@ -99,7 +99,14 @@ from .state import (
     save_manifest,
     stage_is_current,
 )
-from .tablature import STANDARD_TUNING, infer_fingerings, render_ascii, tuning_labels, write_tab
+from .tablature import (
+    FINGERING_VERSION,
+    STANDARD_TUNING,
+    infer_fingerings,
+    render_ascii,
+    tuning_labels,
+    write_tab,
+)
 from .text import MAX_DISPLAY_TEXT, printable_line
 from .types import AudioTrack, ProjectManifest, Stage
 from .util import (
@@ -762,7 +769,7 @@ class Pipeline:
         # source reported and the user never typed still has to invalidate.
         self._run_stage(
             "tablature",
-            "kilix-playalong-fingering:v1",
+            f"kilix-playalong-fingering:v{FINGERING_VERSION}",
             self._tablature,
             inputs={
                 "tuning": self.options.tuning,

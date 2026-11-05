@@ -44,6 +44,8 @@ boundaries.
   practice preset.
 - Printable HTML and ASCII tab exports. Printed lyrics and tab can each be
   hidden independently.
+- A portable songbook with lyrics beside the tab, note names, detected chord
+  labels, editable verse/chorus markers, section loops, and full-song/guitar audio.
 - Resumable, checksummed stages and private XDG storage backed by the shared
   `kilix-state` library.
 
@@ -159,7 +161,57 @@ interrupted project resumes from verified artifacts:
 uv run --frozen kilix-playalong resume song-PROJECT_ID --allow-model-downloads
 ```
 
-## Keyboard controls
+## Export a guitar songbook
+
+```bash
+uv run --frozen kilix-playalong songbook song-PROJECT_ID --output ./my-songbook
+```
+
+Open `my-songbook/index.html` in a browser. Keep its MP3 files beside it when
+copying the folder to another computer. This command uses existing project
+artifacts and FFmpeg; it does not download media or run the ML models again.
+Use `--no-audio` for a smaller chart suitable for printing.
+
+Lyrics appear beside the corresponding tab phrases, with note names under each
+fret. Use **Edit section markers** to add verses, choruses, bridges, and outros,
+set their start times, or remove markers. New projects begin with one **Song**
+section; section boundaries are not automatically classified. Click a fret or
+phrase to play that moment, switch between the full song and isolated guitar,
+slow playback, or loop a section. Each phrase has its own **Loop** button for
+repeating a single line. The player's loop button stops either kind of loop;
+seeking outside its range clears it. Section edits keep an active section loop
+inside its updated boundaries. **Print / Save PDF** prints the chart.
+
+The lyric Edit buttons and section editor save corrections in browser storage
+when available. Download corrections to back them up or transfer them. Corrections
+are tied to the transcript and initial arrangement: a regenerated transcript
+cannot silently apply an older line's edit to a different line. These browser
+edits do not change the project's source files. Storage behavior for `file:`
+pages varies by browser, so keep an exported corrections file.
+
+To start with corrected lyrics and known section markers:
+
+```bash
+uv run --frozen kilix-playalong songbook song-PROJECT_ID \
+  --lyrics corrected.lrc --arrangement sections.json --output ./my-songbook
+```
+
+`sections.json` contains increasing starts in seconds; the first must be zero:
+
+```json
+{"sections":[
+  {"id":"intro","label":"Intro","kind":"intro","start":0},
+  {"id":"verse-1","label":"Verse 1","kind":"verse","start":12},
+  {"id":"chorus-1","label":"Chorus 1","kind":"chorus","start":40}
+]}
+```
+
+The exporter validates times, tuning, and fret/pitch consistency before replacing
+an existing page. Audio conversions finish before the new page is published.
+Old audio files may remain after exporting changed recordings; remove them only
+after confirming no retained page uses them.
+
+## Keyboard controls for the multitrack player
 
 | Key | Action |
 | --- | --- |
@@ -191,6 +243,19 @@ uv run --frozen ruff check src tests
 uv run --frozen ruff format --check src tests
 uv run --frozen mypy
 ```
+
+Optional songbook browser checks use Node, an installed Playwright package, and
+Chromium. They generate original short tones and lyrics in a temporary folder:
+
+```bash
+PLAYWRIGHT_MODULE=/absolute/path/to/playwright-core/index.mjs \
+CHROMIUM_PATH=/usr/bin/chromium node tests/songbook_browser.mjs
+```
+
+With `playwright` and its browser installed on Node's normal module path, both
+environment variables can be omitted. This checks audio switching during loading,
+sustained-note highlighting, phrase/section loops, large correction round trips, mobile
+layout, and printing. The Python gate does not install or run browser tooling.
 
 `make check` runs `uv lock --check` first and lets nothing else start until it
 passes, so a `pyproject.toml` edit that was never re-locked fails the gate
