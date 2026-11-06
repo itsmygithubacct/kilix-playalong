@@ -87,6 +87,8 @@ _FLAGS = {
     "device": "device",
     "tuning": "tuning",
     "max_fret": "max_fret",
+    "note_confidence": "note_confidence",
+    "max_polyphony": "max_polyphony",
     "title": "title",
     "artist": "artist",
     "allow_model_downloads": "allow_model_downloads",
@@ -122,16 +124,16 @@ def test_resume_help_says_what_leaving_each_flag_out_means(
     its own "(default: ...)" only when the default is not None, which is true on `create`
     and false on every flag of `resume` -- so without `_describe` filling it in, this is
     the single line in `resume --help` that never says what leaving it out does, while the
-    twelve flags around it all say "keep what the project recorded".
+    fourteen flags around it all say "keep what the project recorded".
     """
     with pytest.raises(SystemExit):
         main(["resume", "--help"])
     resuming = " ".join(capsys.readouterr().out.split())
     assert "which drifts badly. (default: keep what the project recorded)" in resuming
-    # Every default line on a resume names the project's own answer -- eleven flags say
-    # "keep what the project recorded", the positional says "the source the project
+    # Every default line on a resume names the project's own answer -- thirteen flags
+    # say "keep what the project recorded", the positional says "the source the project
     # recorded" -- so none of them quotes a fresh project's value.
-    assert resuming.count("(default:") == resuming.count("recorded)") == 12
+    assert resuming.count("(default:") == resuming.count("recorded)") == 14
 
     with pytest.raises(SystemExit):
         main(["create", "--help"])

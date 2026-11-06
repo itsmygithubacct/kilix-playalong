@@ -93,6 +93,52 @@ def test_impossible_full_chord_keeps_its_largest_playable_subset() -> None:
     assert infer_fingerings(list(reversed(notes))) == (events, omitted)
 
 
+def test_notes_under_the_confidence_floor_are_omitted() -> None:
+    notes = [Note(0, 1, 40, 0.9), Note(0, 1, 45, 0.2), Note(0, 1, 50, 0.5)]
+    events, omitted = infer_fingerings(notes)
+    assert {position["pitch"] for position in events[0]["positions"]} == {40, 50}
+    assert omitted == 1
+    assert sum(len(event["positions"]) for event in events) + omitted == len(notes)
+
+
+def test_a_same_pitch_restart_inside_the_gap_is_one_note() -> None:
+    notes = [Note(0.0, 0.4, 55, 0.8), Note(0.5, 1.2, 55, 0.6)]
+    events, omitted = infer_fingerings(notes)
+    assert events == [
+        {
+            "start": 0.0,
+            "end": 1.2,
+            "positions": [{"string": 3, "fret": 0, "pitch": 55}],
+        }
+    ]
+    assert omitted == 1
+
+
+def test_a_same_pitch_restart_beyond_the_gap_stays_two_notes() -> None:
+    notes = [Note(0.0, 0.4, 55, 0.8), Note(0.7, 1.2, 55, 0.7)]
+    events, omitted = infer_fingerings(notes)
+    assert [event["start"] for event in events] == [0.0, 0.7]
+    assert omitted == 0
+
+
+def test_the_polyphony_cap_keeps_the_stronger_pitches() -> None:
+    notes = [
+        Note(0, 1, pitch, confidence)
+        for pitch, confidence in (
+            (40, 0.9),
+            (45, 0.8),
+            (50, 0.7),
+            (55, 0.6),
+            (59, 0.55),
+            (64, 0.51),
+        )
+    ]
+    events, omitted = infer_fingerings(notes, max_polyphony=4)
+    assert {position["pitch"] for position in events[0]["positions"]} == {40, 45, 50, 55}
+    assert omitted == 2
+    assert sum(len(event["positions"]) for event in events) + omitted == len(notes)
+
+
 def test_polyphony_and_duplicate_onsets_are_in_the_omission_count() -> None:
     notes = [Note(0, 1, pitch) for pitch in (40, 45, 50, 55, 59, 64, 65)]
     notes.append(Note(0.01, 0.5, 64, 0.5))

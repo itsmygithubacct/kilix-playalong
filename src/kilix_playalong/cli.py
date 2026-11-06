@@ -234,6 +234,18 @@ def _pipeline_options(
             if arguments.max_fret is not None
             else _stored_number(settings, "max_fret", _default(document, "max_fret"))
         ),
+        note_confidence=float(
+            arguments.note_confidence
+            if arguments.note_confidence is not None
+            else _stored_number(
+                settings, "note_confidence", _default(document, "note_confidence")
+            )
+        ),
+        max_polyphony=int(
+            arguments.max_polyphony
+            if arguments.max_polyphony is not None
+            else _stored_number(settings, "max_polyphony", _default(document, "max_polyphony"))
+        ),
         tuning=(
             tuning_pitches(arguments.tuning)
             if arguments.tuning is not None
@@ -493,6 +505,20 @@ def _common_pipeline_options(
         default=default("max_fret"),
         metavar="{12..30}",
         help=_describe(document, "max_fret", resuming=resuming),
+    )
+    parser.add_argument(
+        "--note-confidence",
+        type=float,
+        default=default("note_confidence"),
+        help=_describe(document, "note_confidence", resuming=resuming),
+    )
+    parser.add_argument(
+        "--max-polyphony",
+        type=int,
+        choices=range(1, 7),
+        default=default("max_polyphony"),
+        metavar="{1..6}",
+        help=_describe(document, "max_polyphony", resuming=resuming),
     )
     minutes = float(_default(document, "max_duration")) / 60  # type: ignore[arg-type]
     parser.add_argument(

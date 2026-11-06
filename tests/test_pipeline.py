@@ -422,6 +422,49 @@ def test_fingering_version_change_reuses_audio_and_pitch_work(
     assert calls == {"download": 1, "normalize": 1, "separate": 1, "pitch": 1}
 
 
+def test_note_cleaning_options_rerun_tablature_and_leave_the_pitches(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The floor and the cap are part of the tab key, and of nothing earlier.
+
+    A project made before either field existed must re-finger on the next
+    resume, and must not re-transcribe the guitar to do it. Each field has
+    to be able to cause that on its own.
+    """
+
+    calls, _models = _install_providers(monkeypatch)
+    options = PipelineOptions(url=_URL, rights_confirmed=True, whisper_model="small")
+    project, _manifest = run_new(options)
+    wider = PipelineOptions(
+        url=options.url,
+        rights_confirmed=True,
+        whisper_model="small",
+        max_polyphony=6,
+    )
+    statuses: list[tuple[str, str]] = []
+    resume(project, wider, progress=lambda name, status, _detail: statuses.append((name, status)))
+    assert ("tablature", "running") in statuses
+    assert ("transcribe-guitar", "cached") in statuses
+    assert ("lyrics", "cached") in statuses
+    assert calls["pitch"] == 1
+
+    stricter = PipelineOptions(
+        url=options.url,
+        rights_confirmed=True,
+        whisper_model="small",
+        max_polyphony=6,
+        note_confidence=0.4,
+    )
+    statuses.clear()
+    resume(
+        project, stricter, progress=lambda name, status, _detail: statuses.append((name, status))
+    )
+    assert ("tablature", "running") in statuses
+    assert ("transcribe-guitar", "cached") in statuses
+    assert calls["pitch"] == 1
+
+
 def test_lyrics_stage_reruns_when_model_downloads_are_allowed(
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,

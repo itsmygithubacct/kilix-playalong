@@ -100,7 +100,11 @@ from .state import (
     stage_is_current,
 )
 from .tablature import (
+    DEFAULT_MAX_POLYPHONY,
     FINGERING_VERSION,
+    MAX_POLYPHONY,
+    NOTE_CONFIDENCE_FLOOR,
+    RESTART_GAP_SECONDS,
     STANDARD_TUNING,
     infer_fingerings,
     render_ascii,
@@ -336,6 +340,8 @@ class PipelineOptions:
     max_duration: float = 30 * 60
     max_fret: int = 20
     tuning: tuple[int, ...] = STANDARD_TUNING
+    note_confidence: float = NOTE_CONFIDENCE_FLOOR
+    max_polyphony: int = DEFAULT_MAX_POLYPHONY
     allow_model_downloads: bool = False
     rights_confirmed: bool = False
 
@@ -399,6 +405,18 @@ def _validate_options(options: PipelineOptions, *, require_rights: bool) -> None
         raise InvalidInputError("maximum fret must be between 12 and 30")
     if not valid_tuning(options.tuning):
         raise InvalidInputError("tuning must contain six ascending MIDI pitches")
+    if (
+        isinstance(options.note_confidence, bool)
+        or not math.isfinite(options.note_confidence)
+        or not 0 <= options.note_confidence <= 1
+    ):
+        raise InvalidInputError("note confidence must be between 0 and 1")
+    if (
+        isinstance(options.max_polyphony, bool)
+        or not isinstance(options.max_polyphony, int)
+        or not 1 <= options.max_polyphony <= MAX_POLYPHONY
+    ):
+        raise InvalidInputError(f"polyphony cap must be between 1 and {MAX_POLYPHONY}")
 
 
 def _source_identity(spec: SourceSpec, *, max_duration: float) -> str:
@@ -466,6 +484,8 @@ def create_project(options: PipelineOptions) -> tuple[Path, ProjectManifest]:
         max_duration=options.max_duration,
         tuning=options.tuning,
         max_fret=options.max_fret,
+        note_confidence=options.note_confidence,
+        max_polyphony=options.max_polyphony,
     )
     manifest["source"]["kind"] = spec.kind
     if isinstance(spec, YouTubeSource):
@@ -774,6 +794,9 @@ class Pipeline:
             inputs={
                 "tuning": self.options.tuning,
                 "max_fret": self.options.max_fret,
+                "note_confidence": self.options.note_confidence,
+                "max_polyphony": self.options.max_polyphony,
+                "restart_gap": RESTART_GAP_SECONDS,
                 "title": self.manifest["title"],
                 "artist": self.manifest["artist"],
             },
@@ -1636,6 +1659,8 @@ class Pipeline:
             notes,
             tuning=self.options.tuning,
             max_fret=self.options.max_fret,
+            confidence_floor=self.options.note_confidence,
+            max_polyphony=self.options.max_polyphony,
         )
         if not events:
             raise ProviderFailedError("no playable guitar fingerings could be inferred")
@@ -1766,6 +1791,8 @@ def resume(
         max_duration=options.max_duration,
         tuning=list(options.tuning),
         max_fret=options.max_fret,
+        note_confidence=options.note_confidence,
+        max_polyphony=options.max_polyphony,
         lyrics_source=options.lyrics_source,
         audio_source=options.audio_source,
         align_supplied_text=options.align_supplied_text,

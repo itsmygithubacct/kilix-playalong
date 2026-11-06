@@ -17,6 +17,26 @@ from .util import canonical_json, private_write
 STANDARD_TUNING = (40, 45, 50, 55, 59, 64)  # low E to high e
 STANDARD_LABELS = ("E", "A", "D", "G", "B", "e")
 FINGERING_VERSION = 3
+# One pitch per string. `group_notes` still defaults to this so a caller that
+# did not ask for a thinner chord keeps a real six-note shape. The intake
+# setting defaults lower, in `DEFAULT_MAX_POLYPHONY`.
+MAX_POLYPHONY = 6
+# One hand. A finished sparse song still had four-, five- and six-note events
+# after Basic Pitch, and four of those pitches were the stronger guesses.
+# Six stays available: the setting's ceiling is `MAX_POLYPHONY`.
+DEFAULT_MAX_POLYPHONY = 4
+# Measured on the four finished projects this worker had already transcribed.
+# 0.6 opened multi-second holes in a continuous fingerstyle part and in a
+# second guitar part (coverage down to about a third on the thinner of the
+# two). 0.5 kept every one of those parts above roughly 85% coverage and
+# still took the sparse song from about nine detections a second to about
+# two. 0 keeps the cloud. The onset threshold inside the worker is a
+# different number and is not this floor.
+NOTE_CONFIDENCE_FLOOR = 0.5
+# A same-pitch detection that begins within this long of the previous one's
+# end is the same note retriggered, not a second attack. On the sparse song
+# more than half the raw detections were that case.
+RESTART_GAP_SECONDS = 0.15
 _PITCH_CLASSES = ("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
 
 
@@ -41,6 +61,50 @@ class Fingering:
     positions: tuple[tuple[int, int, int], ...]  # string, fret, pitch
     hand: float
     local_cost: float
+
+
+def prepare_guitar_notes(
+    notes: list[Note],
+    *,
+    confidence_floor: float = NOTE_CONFIDENCE_FLOOR,
+    restart_gap: float = RESTART_GAP_SECONDS,
+) -> tuple[list[Note], int]:
+    """Drop unsure detections, then draw one held pitch instead of its restarts.
+
+    The count is every note that does not survive as its own event. A restart
+    absorbed into the note already sounding is omitted, and so is a detection
+    under the floor. Order is the floor first: a weak restart must not stretch
+    a note that was actually played.
+    """
+
+    if not math.isfinite(confidence_floor) or confidence_floor < 0:
+        raise ValueError("confidence floor must be a nonnegative finite number")
+    if not math.isfinite(restart_gap) or restart_gap < 0:
+        raise ValueError("restart gap must be a nonnegative finite number")
+    kept = [note for note in notes if note.confidence >= confidence_floor]
+    removed = len(notes) - len(kept)
+    by_pitch: dict[int, list[Note]] = {}
+    for note in kept:
+        by_pitch.setdefault(note.pitch, []).append(note)
+    prepared: list[Note] = []
+    for group in by_pitch.values():
+        group.sort(key=lambda note: (note.start, note.end, -note.confidence))
+        current = group[0]
+        for note in group[1:]:
+            if note.start - current.end <= restart_gap:
+                current = Note(
+                    current.start,
+                    max(current.end, note.end),
+                    current.pitch,
+                    max(current.confidence, note.confidence),
+                )
+                removed += 1
+                continue
+            prepared.append(current)
+            current = note
+        prepared.append(current)
+    prepared.sort()
+    return prepared, removed
 
 
 def group_notes(
@@ -162,11 +226,31 @@ def infer_fingerings(
     *,
     tuning: tuple[int, ...] = STANDARD_TUNING,
     max_fret: int = 20,
+    confidence_floor: float = NOTE_CONFIDENCE_FLOOR,
+    restart_gap: float = RESTART_GAP_SECONDS,
+    max_polyphony: int = MAX_POLYPHONY,
 ) -> tuple[list[TabEvent], int]:
+    """Finger the notes a player can use.
+
+    `max_polyphony` defaults to the neck, not to the intake setting. The
+    pipeline passes `DEFAULT_MAX_POLYPHONY` unless the project asked for more.
+    Cleaning runs before grouping: a cloud of low-confidence restarts is not
+    a chord, and the fretboard cost is not what thins it.
+    """
+
+    prepared, removed = prepare_guitar_notes(
+        notes,
+        confidence_floor=confidence_floor,
+        restart_gap=restart_gap,
+    )
     playable_pitches = {open_pitch + fret for open_pitch in tuning for fret in range(max_fret + 1)}
-    chords = group_notes(notes, playable_pitches=playable_pitches)
+    chords = group_notes(
+        prepared,
+        max_polyphony=max_polyphony,
+        playable_pitches=playable_pitches,
+    )
     playable: list[tuple[Chord, list[Fingering]]] = []
-    omitted = sum(chord.omitted_notes for chord in chords)
+    omitted = removed + sum(chord.omitted_notes for chord in chords)
     for chord in chords:
         candidates = _fingerings(chord, tuning, max_fret)
         if not candidates:

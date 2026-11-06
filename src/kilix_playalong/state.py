@@ -11,6 +11,7 @@ from kilix_state import CorruptStateError, StateNotFoundError, Store
 from . import PROJECT_SCHEMA
 from .errors import CorruptProjectError
 from .paths import project_artifact
+from .tablature import DEFAULT_MAX_POLYPHONY, NOTE_CONFIDENCE_FLOOR
 from .types import Artifact, ProjectManifest, Stage
 from .util import canonical_json, sha256_file, utc_now
 
@@ -52,6 +53,8 @@ def new_manifest(
     max_duration: float = 30 * 60,
     tuning: tuple[int, ...] = (40, 45, 50, 55, 59, 64),
     max_fret: int = 20,
+    note_confidence: float = NOTE_CONFIDENCE_FLOOR,
+    max_polyphony: int = DEFAULT_MAX_POLYPHONY,
 ) -> ProjectManifest:
     now = utc_now()
     return {
@@ -78,6 +81,8 @@ def new_manifest(
             "max_duration": max_duration,
             "tuning": list(tuning),
             "max_fret": max_fret,
+            "note_confidence": note_confidence,
+            "max_polyphony": max_polyphony,
         },
         "stages": {name: _pending_stage() for name in STAGE_NAMES},
         "tracks": [],

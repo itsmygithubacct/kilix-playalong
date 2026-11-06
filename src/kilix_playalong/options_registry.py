@@ -94,7 +94,13 @@ from .pipeline import (
 )
 from .providers import basic_pitch, media, separation, transcription
 from .source import MAX_FILE_BYTES, format_size
-from .tablature import STANDARD_TUNING, tuning_labels
+from .tablature import (
+    DEFAULT_MAX_POLYPHONY,
+    MAX_POLYPHONY,
+    NOTE_CONFIDENCE_FLOOR,
+    STANDARD_TUNING,
+    tuning_labels,
+)
 from .util import public_error
 
 #: Named tunings a surface can offer. It has replaced `cli`'s copy: `cli` imports
@@ -130,6 +136,8 @@ BACKEND_FIELDS: Mapping[str, str] = {
     "align_supplied_text": "align_supplied_text",
     "tuning": "tuning",
     "max_fret": "max_fret",
+    "note_confidence": "note_confidence",
+    "max_polyphony": "max_polyphony",
     "max_duration": "max_duration",
     "allow_model_downloads": "allow_model_downloads",
     "rights_confirmed": "rights_confirmed",
@@ -166,6 +174,8 @@ _MIN_DURATION = 1.0
 _MAX_DURATION = 2.0 * 60 * 60
 _MIN_FRET = 12
 _MAX_FRET = 30
+_MIN_POLYPHONY = 1
+_MAX_NOTE_CONFIDENCE = 1.0
 
 
 def tuning_pitches(value: object) -> tuple[int, ...]:
@@ -938,6 +948,40 @@ def _tablature_group(machine: _Machine) -> OptionGroup:
                 minimum=_MIN_FRET,
                 maximum=_MAX_FRET,
                 unit="fret",
+                advanced=True,
+                available=guitar_reason is None,
+                unavailable_reason=guitar_reason,
+            ),
+            OptionSpec(
+                id="note_confidence",
+                label="Guitar note confidence",
+                type="float",
+                default=NOTE_CONFIDENCE_FLOOR,
+                stage="tablature",
+                help=(
+                    "Drop detections Basic Pitch is less sure about than this. 0 keeps "
+                    "every one. 0.5 still leaves a continuous part intact; higher opens "
+                    "holes in a real guitar line."
+                ),
+                minimum=0,
+                maximum=_MAX_NOTE_CONFIDENCE,
+                advanced=True,
+                available=guitar_reason is None,
+                unavailable_reason=guitar_reason,
+            ),
+            OptionSpec(
+                id="max_polyphony",
+                label="Notes sounding at once",
+                type="int",
+                default=DEFAULT_MAX_POLYPHONY,
+                stage="tablature",
+                help=(
+                    "How many pitches one onset may keep, strongest first. 4 is one "
+                    "hand. Raise it for a chord that really uses five or six notes."
+                ),
+                minimum=_MIN_POLYPHONY,
+                maximum=MAX_POLYPHONY,
+                unit="notes",
                 advanced=True,
                 available=guitar_reason is None,
                 unavailable_reason=guitar_reason,

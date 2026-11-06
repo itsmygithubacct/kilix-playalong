@@ -52,6 +52,7 @@ bound the work before doing it.
 from __future__ import annotations
 
 import html
+import itertools
 import json
 import math
 import os
@@ -108,6 +109,13 @@ _SIMULTANEOUS_SECONDS = 0.05
 #: Fragments of one sung line sit essentially adjacent; a real line break does
 #: not. Merging is gated on the gap *and* on the text reading as a continuation.
 _MERGE_GAP_SECONDS = 0.35
+# A silence between two words of one cue. Whisper reports the segment as one
+# line when its own words run to the segment's end, and `_trim_instrumental`
+# trusts that evidence and will not cut it. The timestamps are the hole.
+# Caption fragments closer than `_MERGE_GAP_SECONDS` are a different case and
+# still merge. This threshold is what stops the merge from gluing a split
+# back together once `_space_cues` has raised a short piece toward the next.
+_WORD_GAP_SECONDS = 1.0
 _MERGE_CHARS = 84
 _MERGE_SPAN_SECONDS = 9.0
 #: A rolling caption re-sends the line it is extending, so its pair spans longer
@@ -363,12 +371,91 @@ def _joined_words(previous: LyricCue, cue: LyricCue) -> list[LyricWord]:
     return []
 
 
+def _contains_word_gap(words: Sequence[LyricWord]) -> bool:
+    """Whether timed words leave a silence longer than one sung breath.
+
+    Untimed words are not evidence either way and are ignored. The comparison
+    is on the words' own stamps, not on the cue ends `_space_cues` may have
+    moved: a readable minimum can close the gap between two cues without
+    making the silence between their words any shorter.
+    """
+
+    timed: list[tuple[float, float]] = []
+    for word in words:
+        start = _finite_number(word.get("start"))
+        end = _finite_number(word.get("end"))
+        if start is None or end is None:
+            continue
+        timed.append((start, end))
+    timed.sort()
+    return any(
+        following - previous > _WORD_GAP_SECONDS
+        for (_start, previous), (following, _end) in itertools.pairwise(timed)
+    )
+
+
+def _split_word_gaps(cues: list[LyricCue]) -> list[LyricCue]:
+    """Break a cue whose own words are not one sung line.
+
+    The text of a piece is its words, in order. A cue that does not split
+    keeps the text it arrived with, which may carry punctuation the words
+    do not. The first piece keeps the cue's start, so a pickup before the
+    first word stays put. The last piece keeps the cue's end when that end
+    is a tail after the last word rather than a hole already split away.
+    """
+
+    result: list[LyricCue] = []
+    for cue in cues:
+        words = [word for word in cue["words"] if _plain_text(str(word.get("text", "")))]
+        timed: list[LyricWord] = []
+        for word in words:
+            start = _finite_number(word.get("start"))
+            end = _finite_number(word.get("end"))
+            if start is None or end is None:
+                result.append(cue)
+                timed = []
+                break
+            timed.append(word)
+        else:
+            if len(timed) < 2 or not _contains_word_gap(timed):
+                result.append(cue)
+                continue
+            ordered = sorted(timed, key=lambda word: (float(word["start"]), float(word["end"])))
+            groups: list[list[LyricWord]] = [[ordered[0]]]
+            for word in ordered[1:]:
+                if float(word["start"]) - float(groups[-1][-1]["end"]) > _WORD_GAP_SECONDS:
+                    groups.append([word])
+                else:
+                    groups[-1].append(word)
+            for index, group in enumerate(groups):
+                text = _plain_text(" ".join(_plain_text(str(word["text"])) for word in group))
+                if not text:
+                    continue
+                start = float(cue["start"]) if index == 0 else float(group[0]["start"])
+                end = (
+                    max(float(group[-1]["end"]), float(cue["end"]))
+                    if index == len(groups) - 1
+                    else float(group[-1]["end"])
+                )
+                result.append(
+                    {
+                        "start": start,
+                        "end": max(end, start),
+                        "text": text,
+                        "words": group,
+                    }
+                )
+    return result
+
+
 def _merge_pair(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
     if previous["text"] == cue["text"]:
         # A line and a copy of itself are never two fragments of one line.
         # `_collapse_resends` has already folded away the copies that are one
         # performance arriving twice, so what reaches here is the line being
         # sung again -- and joining it would put "Hey Jude Hey Jude" in one row.
+        return None
+    if previous["words"] and cue["words"] and _contains_word_gap(_joined_words(previous, cue)):
         return None
     gap = cue["start"] - previous["end"]
     end = max(previous["end"], cue["end"])
@@ -654,6 +741,7 @@ def _normalize_once(
         result = _collapse_resends(result)
         if not authored_lines:
             result = _merge_fragments(result)
+        result = _split_word_gaps(result)
     _space_cues(result, duration)
     words_total = 0
     for cue in result:

@@ -486,6 +486,123 @@ def test_a_rolling_caption_is_collapsed_rather_than_repeated(tmp_path: Path) -> 
     assert cues[0]["start"] == 1.0
 
 
+def test_a_silence_between_timed_words_splits_the_cue(tmp_path: Path) -> None:
+    """A whisper segment can hold a hole and still call itself one line.
+
+    `_trim_instrumental` will not cut a cue whose own words run to its end.
+    The word stamps are the evidence that the middle was not sung. A second
+    load has to keep the split: `_space_cues` may close a short piece toward
+    the next word, and that must not let `_merge_fragments` glue the hole shut.
+    """
+
+    source = tmp_path / "lyrics.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema": LYRICS_SCHEMA,
+                "source": "faster-whisper:large-v3",
+                "language": "en",
+                "timing": "authored",
+                "cues": [
+                    {
+                        "start": 10.0,
+                        "end": 50.0,
+                        "text": "leave this mission there is an island",
+                        "words": [
+                            {"start": 10.0, "end": 10.4, "text": "leave"},
+                            {"start": 10.5, "end": 10.8, "text": "this"},
+                            {"start": 10.9, "end": 11.4, "text": "mission"},
+                            {"start": 40.0, "end": 40.3, "text": "there"},
+                            {"start": 40.4, "end": 40.6, "text": "is"},
+                            {"start": 40.7, "end": 41.0, "text": "an"},
+                            {"start": 41.1, "end": 41.6, "text": "island"},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    cues, provider, language = load_lyrics(source, duration=60)
+    assert [cue["text"] for cue in cues] == ["leave this mission", "there is an island"]
+    assert cues[0]["end"] < 20.0
+    assert cues[1]["start"] == 40.0
+    assert cues[0]["end"] <= cues[1]["start"]
+    assert _reader_complaints(cues) == []
+    written = tmp_path / "again.json"
+    write_lyrics(written, cues, source=provider, language=language, timing="authored")
+    reloaded, _source, _language = load_lyrics(written, duration=60)
+    assert [(cue["start"], cue["end"], cue["text"]) for cue in reloaded] == [
+        (cue["start"], cue["end"], cue["text"]) for cue in cues
+    ]
+
+
+def test_a_short_word_gap_stays_one_sung_line(tmp_path: Path) -> None:
+    source = tmp_path / "lyrics.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema": LYRICS_SCHEMA,
+                "source": "faster-whisper:tiny",
+                "language": "en",
+                "timing": "authored",
+                "cues": [
+                    {
+                        "start": 1.0,
+                        "end": 3.0,
+                        "text": "alpha beta gamma",
+                        "words": [
+                            {"start": 1.0, "end": 1.4, "text": "alpha"},
+                            {"start": 1.6, "end": 2.0, "text": "beta"},
+                            {"start": 2.2, "end": 2.8, "text": "gamma"},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    cues, _source, _language = load_lyrics(source, duration=30)
+    assert [cue["text"] for cue in cues] == ["alpha beta gamma"]
+
+
+def test_a_one_second_gap_after_a_short_word_survives_a_reload(tmp_path: Path) -> None:
+    """The readable minimum can almost close a one-second hole. The words cannot.
+
+    A single short word followed a little over a second later by the next one
+    is the case `_space_cues` can pull back under `_MERGE_GAP_SECONDS`. The
+    split has to still be there after the document is written and loaded.
+    """
+
+    source = tmp_path / "lyrics.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema": LYRICS_SCHEMA,
+                "source": "faster-whisper:tiny",
+                "language": "en",
+                "timing": "authored",
+                "cues": [
+                    {
+                        "start": 10.0,
+                        "end": 12.0,
+                        "text": "go stop",
+                        "words": [
+                            {"start": 10.0, "end": 10.2, "text": "go"},
+                            {"start": 11.3, "end": 11.8, "text": "stop"},
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    cues, provider, language = load_lyrics(source, duration=30)
+    assert [cue["text"] for cue in cues] == ["go", "stop"]
+    written = tmp_path / "again.json"
+    write_lyrics(written, cues, source=provider, language=language, timing="authored")
+    reloaded, _source, _language = load_lyrics(written, duration=30)
+    assert [cue["text"] for cue in reloaded] == ["go", "stop"]
+    assert _reader_complaints(reloaded) == []
+
+
 def test_a_cue_is_not_held_across_an_instrumental_gap(tmp_path: Path) -> None:
     source = tmp_path / "song.lrc"
     source.write_text("[00:01.00]Alpha beta gamma\n[00:50.00]Delta epsilon\n")

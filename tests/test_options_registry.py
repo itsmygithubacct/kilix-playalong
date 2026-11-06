@@ -164,7 +164,7 @@ def test_document_defaults_satisfy_the_pipeline_validator() -> None:
     _validate_options(options, require_rights=True)
 
 
-@pytest.mark.parametrize("option_id", ["max_duration", "max_fret"])
+@pytest.mark.parametrize("option_id", ["max_duration", "max_fret", "note_confidence", "max_polyphony"])
 def test_numeric_bounds_match_the_pipeline_validator(option_id: str) -> None:
     """The advertised range must be the range the backend enforces, at both ends."""
 
@@ -869,7 +869,7 @@ def test_missing_demucs_greys_separation_and_moves_transcription_to_the_mix(
 def test_missing_basic_pitch_greys_the_tab_options(monkeypatch: pytest.MonkeyPatch) -> None:
     _strip_machine(monkeypatch, guitar=False)
     document = build_options_document()
-    for option_id in ("tuning", "max_fret"):
+    for option_id in ("tuning", "max_fret", "note_confidence", "max_polyphony"):
         option = document.option(option_id)
         assert option is not None and not option.available
         assert option.unavailable_reason is not None
