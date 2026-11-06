@@ -109,6 +109,11 @@ _SIMULTANEOUS_SECONDS = 0.05
 #: Fragments of one sung line sit essentially adjacent; a real line break does
 #: not. Merging is gated on the gap *and* on the text reading as a continuation.
 _MERGE_GAP_SECONDS = 0.35
+#: Words a caption must repeat before it is the line still on screen.
+#: YouTube's auto-captions roll a window: the next cue starts with the
+#: previous cue's last line and then adds words. Two shared words is how
+#: ordinary lines begin alike. Three is the window.
+_ROLL_OVERLAP_WORDS = 3
 # A silence between two words of one cue. Whisper reports the segment as one
 # line when its own words run to the segment's end, and `_trim_instrumental`
 # trusts that evidence and will not cut it. The timestamps are the hole.
@@ -358,6 +363,29 @@ def _is_extension(previous: str, text: str) -> bool:
     return len(text) > len(previous) and text.startswith(previous) and text[len(previous)] == " "
 
 
+def _roll_addition(previous: str, following: str) -> str | None:
+    """Words `following` adds when it repeats a suffix of `previous`.
+
+    ``None`` when the pair is not a rolling caption. ``""`` when `following`
+    is only that suffix and adds nothing. An identical line is not a roll:
+    a chorus sung again has the same words and is kept as its own cue.
+    """
+
+    previous_words = previous.split()
+    following_words = following.split()
+    if not previous_words or previous_words == following_words:
+        return None
+    limit = min(len(previous_words), len(following_words))
+    overlap = 0
+    for size in range(limit, _ROLL_OVERLAP_WORDS - 1, -1):
+        if previous_words[-size:] == following_words[:size]:
+            overlap = size
+            break
+    if overlap < _ROLL_OVERLAP_WORDS:
+        return None
+    return " ".join(following_words[overlap:])
+
+
 def _joined_words(previous: LyricCue, cue: LyricCue) -> list[LyricWord]:
     """Word timings for a merged cue, or none when they would cover only half.
 
@@ -460,6 +488,20 @@ def _merge_pair(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
     gap = cue["start"] - previous["end"]
     end = max(previous["end"], cue["end"])
     span = end - previous["start"]
+    # A rolling caption repeats the line already showing and then adds words.
+    # Joining the whole cue pastes that line on twice. `added` is only the
+    # new words; "" means the cue is the repeated line and nothing more.
+    # Cues that carry their own word timings are not captions of this shape.
+    added = None if cue["words"] else _roll_addition(previous["text"], cue["text"])
+    if added == "" and (
+        gap <= _MERGE_GAP_SECONDS or cue["start"] - previous["start"] < _SIMULTANEOUS_SECONDS
+    ):
+        return {
+            "start": previous["start"],
+            "end": end,
+            "text": previous["text"],
+            "words": previous["words"],
+        }
     if cue["start"] - previous["start"] < _SIMULTANEOUS_SECONDS:
         # Two stamps at one instant are two rows of one screen, and leaving them
         # separate forces one of them to a zero-length span in `_space_cues`.
@@ -488,14 +530,14 @@ def _merge_pair(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
                 "text": previous["text"],
                 "words": previous["words"] or cue["words"] or [],
             }
-        joined = f"{previous['text']} {cue['text']}"
+        joined = _joined_caption(previous["text"], cue["text"], added)
         if len(joined) > _MERGE_CHARS * 2:
             return None
         return {
             "start": previous["start"],
             "end": end,
             "text": joined,
-            "words": _joined_words(previous, cue),
+            "words": [] if added is not None else _joined_words(previous, cue),
         }
     if gap > _MERGE_GAP_SECONDS:
         return None
@@ -508,6 +550,24 @@ def _merge_pair(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
             "text": cue["text"],
             "words": cue["words"] or [],
         }
+    if added is not None:
+        joined = f"{previous['text']} {added}"
+        short = len(added.split()) < _ROLL_OVERLAP_WORDS
+        fits = (
+            len(joined) <= _MERGE_CHARS
+            and span <= _MERGE_SPAN_SECONDS
+            and _ends_open(previous["text"])
+        )
+        if fits or (short and span <= _EXTENSION_SPAN_SECONDS):
+            return {
+                "start": previous["start"],
+                "end": end,
+                "text": joined,
+                "words": [],
+            }
+        # The repeated window does not fit on this line. The caller stores
+        # `added` on its own, so the next row starts at the new words.
+        return None
     joined = f"{previous['text']} {cue['text']}"
     if len(joined) > _MERGE_CHARS or span > _MERGE_SPAN_SECONDS:
         return None
@@ -519,6 +579,29 @@ def _merge_pair(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
         "text": joined,
         "words": _joined_words(previous, cue),
     }
+
+
+def _joined_caption(previous: str, following: str, added: str | None) -> str:
+    if added is None:
+        return f"{previous} {following}"
+    if not added:
+        return previous
+    return f"{previous} {added}"
+
+
+def _detached_roll(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
+    """The new words of a roll that did not fit on the line already open.
+
+    ``_merge_pair`` returns None for that pair. Leaving the cue as it arrived
+    puts the previous line's last words at the start of this one.
+    """
+
+    if cue["words"] or cue["start"] - previous["end"] > _MERGE_GAP_SECONDS:
+        return None
+    added = _roll_addition(previous["text"], cue["text"])
+    if not added:
+        return None
+    return {"start": cue["start"], "end": max(cue["end"], cue["start"]), "text": added, "words": []}
 
 
 def _merge_fragments(cues: list[LyricCue]) -> list[LyricCue]:
@@ -544,6 +627,11 @@ def _merge_fragments(cues: list[LyricCue]) -> list[LyricCue]:
                 candidate = _merge_pair(merged[-1], cue)
                 if candidate is not None:
                     merged[-1] = candidate
+                    changed = True
+                    continue
+                detached = _detached_roll(merged[-1], cue)
+                if detached is not None:
+                    merged.append(detached)
                     changed = True
                     continue
             merged.append(cue)

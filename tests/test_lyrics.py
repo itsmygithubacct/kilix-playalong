@@ -18,6 +18,7 @@ from kilix_playalong.lyrics import (
     MAX_WORDS,
     EmbeddedLyrics,
     LyricAlignment,
+    _roll_addition,
     choose_subtitle_track,
     embedded_lyrics_document,
     embedded_tag_key,
@@ -1742,3 +1743,8 @@ def test_a_rolling_caption_stub_is_not_put_on_screen_twice(tmp_path: Path) -> No
         half = len(words) // 2
         assert words[:half] != words[half : half * 2], f"line doubled: {cue['text']!r}"
     assert cues[0]["text"] == "for change old ladies laughing from the fire escape cursing my"
+    # The next caption starts by repeating that line's tail. The repeated
+    # words stay on the first cue; the new cue starts at the words it adds.
+    assert len(cues) == 2
+    assert cues[1]["text"] == "name I got a basket full of lemons"
+    assert _roll_addition(cues[0]["text"], cues[1]["text"]) is None

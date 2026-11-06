@@ -59,6 +59,34 @@ def test_printable_export_escapes_user_text(tmp_path: Path) -> None:
     assert "A &amp; B" in document
 
 
+def test_a_printable_clock_carries_the_minute(tmp_path: Path) -> None:
+    lyrics = tmp_path / "lyrics.json"
+    tab = tmp_path / "tab.json"
+    output = tmp_path / "print.html"
+    write_lyrics(
+        lyrics,
+        [{"start": 59.996, "end": 61.0, "text": "one line", "words": []}],
+        source="fixture",
+        language="en",
+    )
+    write_tab(
+        tab,
+        [{"start": 119.996, "end": 121.0, "positions": [{"string": 0, "fret": 0, "pitch": 40}]}],
+        source_midi="midi/guitar.mid",
+    )
+    render_printable(
+        output,
+        title="A title",
+        artist="An artist",
+        lyrics_path=lyrics,
+        tab_path=tab,
+    )
+    document = output.read_text()
+    assert "01:00.00" in document
+    assert "02:00.00" in document
+    assert ":60" not in document
+
+
 def test_doctor_json_is_machine_readable(capsys: object) -> None:
     result = main(["doctor", "--json"])
     captured = capsys.readouterr()

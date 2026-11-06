@@ -300,7 +300,39 @@ def infer_fingerings(
                 "positions": positions,
             }
         )
+    _release_reused_strings(events)
     return events, omitted
+
+
+def _release_reused_strings(events: list[TabEvent]) -> None:
+    """End an event when a later event plays one of its strings.
+
+    The event's end is the latest note in it, and every fret in it is drawn
+    for that whole span. A later note on one of those strings then shares the
+    string with a fret that is still on screen. One string sounds one fret.
+    The later onset is the one that is played, so the earlier event stops
+    there. Strings the later event does not use lose that extra tail too:
+    an event has one end. Positions are not removed, and a note on a string
+    the later events leave alone keeps the end it had.
+    """
+
+    for index, event in enumerate(events):
+        occupied = {int(position["string"]) for position in event["positions"]}
+        if not occupied:
+            continue
+        limit = float(event["end"])
+        start = float(event["start"])
+        for later in events[index + 1 :]:
+            later_start = float(later["start"])
+            if later_start >= limit:
+                break
+            if later_start <= start:
+                continue
+            if occupied.intersection(int(position["string"]) for position in later["positions"]):
+                limit = later_start
+                break
+        if start < limit < float(event["end"]):
+            event["end"] = limit
 
 
 def write_tab(
@@ -329,8 +361,20 @@ def write_tab(
 
 
 def timestamp(seconds: float) -> str:
-    minutes, remainder = divmod(max(0.0, seconds), 60)
-    return f"{int(minutes):02d}:{remainder:06.3f}"
+    """Minute and second, rounded so a value just under the next minute does not read as 60.
+
+    Formatting the remainder in place turns 59.9996 into ``00:60.000``. The
+    second field is rounded first and the minute carries when that field is 60.
+    """
+
+    return _clock_text(seconds, 3)
+
+
+def _clock_text(seconds: float, decimals: int) -> str:
+    factor = 10**decimals
+    ticks = round(max(0.0, seconds) * factor)
+    minutes, remainder = divmod(ticks, 60 * factor)
+    return f"{minutes:02d}:{remainder / factor:0{decimals + 3}.{decimals}f}"
 
 
 def render_ascii(

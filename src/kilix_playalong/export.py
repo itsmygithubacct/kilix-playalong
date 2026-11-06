@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import cast
 
 from . import LYRICS_SCHEMA, TAB_SCHEMA
+from .tablature import _clock_text
 from .types import LyricCue, TabEvent
 from .util import private_write
 
@@ -24,8 +25,13 @@ def _tab_system(events: list[TabEvent], labels: list[str]) -> str:
 
 
 def _clock(seconds: float) -> str:
-    minutes, remainder = divmod(max(0, seconds), 60)
-    return f"{int(minutes):02d}:{remainder:05.2f}"
+    """Minute and second to two decimals, carrying when the second field would be 60.
+
+    Same rounding as `tablature.timestamp`, one decimal place coarser, so a
+    printable and an ASCII tab do not disagree about which minute a note is in.
+    """
+
+    return _clock_text(seconds, 2)
 
 
 def render_printable(

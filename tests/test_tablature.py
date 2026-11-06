@@ -13,6 +13,7 @@ from kilix_playalong.tablature import (
     infer_fingerings,
     read_tab,
     render_ascii,
+    timestamp,
     tuning_labels,
     write_tab,
 )
@@ -146,6 +147,43 @@ def test_polyphony_and_duplicate_onsets_are_in_the_omission_count() -> None:
     assert len(events[0]["positions"]) == 6
     assert omitted == 2
     assert sum(len(event["positions"]) for event in events) + omitted == len(notes)
+
+
+def test_the_next_note_on_a_string_ends_the_fret_still_drawn() -> None:
+    """A later fret on the same string is what the player would paint on top.
+
+    Pitch 40 and pitch 41 fit only the low string. The open note's own end is
+    later, and the event used to keep that end, so both frets occupied the
+    string together. The later onset is the one that sounds.
+    """
+
+    notes = [Note(0.0, 2.0, 40, 0.9), Note(0.5, 0.8, 41, 0.9)]
+    events, omitted = infer_fingerings(notes)
+    assert omitted == 0
+    assert events[0]["end"] == 0.5
+    assert events[0]["positions"] == [{"string": 0, "fret": 0, "pitch": 40}]
+    assert events[1] == {
+        "start": 0.5,
+        "end": 0.8,
+        "positions": [{"string": 0, "fret": 1, "pitch": 41}],
+    }
+    assert sum(len(event["positions"]) for event in events) + omitted == len(notes)
+
+
+def test_a_note_on_a_free_string_keeps_its_sustain() -> None:
+    notes = [Note(0.0, 2.0, 40, 0.9), Note(0.5, 0.8, 45, 0.9)]
+    events, omitted = infer_fingerings(notes)
+    assert omitted == 0
+    assert events[0]["end"] == 2.0
+    assert events[1]["end"] == 0.8
+    assert {position["pitch"] for position in events[0]["positions"]} == {40}
+    assert {position["pitch"] for position in events[1]["positions"]} == {45}
+
+
+def test_a_timestamp_at_the_end_of_a_minute_carries() -> None:
+    assert timestamp(59.9996) == "01:00.000"
+    assert timestamp(59.9994) == "00:59.999"
+    assert timestamp(0) == "00:00.000"
 
 
 def test_tuning_labels_follow_the_selected_open_strings() -> None:
