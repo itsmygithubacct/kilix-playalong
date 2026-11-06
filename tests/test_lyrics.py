@@ -1748,3 +1748,72 @@ def test_a_rolling_caption_stub_is_not_put_on_screen_twice(tmp_path: Path) -> No
     assert len(cues) == 2
     assert cues[1]["text"] == "name I got a basket full of lemons"
     assert _roll_addition(cues[0]["text"], cues[1]["text"]) is None
+
+
+def test_a_simultaneous_roll_that_does_not_fit_keeps_its_repeated_words(tmp_path: Path) -> None:
+    """The earlier of two stamps at one instant is about to lose its span.
+
+    Stripping the repeated window off the later cue would leave those words
+    only on the cue the songbook then drops, because its end is not after
+    its start. The later cue has to keep the window.
+    """
+
+    # The earlier line has to sort first. Equal stamps order by text, and the
+    # roll is the cue that follows.
+    previous = f"alpha beta gamma {'hold ' * 20}".strip()
+    following = f"hold hold hold {'tail ' * 30}".strip()
+    captions = tmp_path / "source.en.vtt"
+    captions.write_text(
+        "WEBVTT\n\n"
+        f"00:00:05.000 --> 00:00:09.000\n{previous}\n\n"
+        f"00:00:05.000 --> 00:00:09.000\n{following}\n"
+    )
+    cues, _source, _language = load_lyrics(captions, duration=30)
+    shown = [cue["text"] for cue in cues if cue["end"] > cue["start"]]
+    assert shown == [following]
+
+
+def test_a_timed_line_is_not_rewritten_as_a_rolling_caption(tmp_path: Path) -> None:
+    """Word timings mean the line was heard, not that a caption rolled forward.
+
+    The later cue repeats a suffix and adds one word. Treating that as a roll
+    would join across the full stop and replace the measured stamps with an
+    even spread.
+    """
+
+    source = tmp_path / "lyrics.json"
+    source.write_text(
+        json.dumps(
+            {
+                "schema": LYRICS_SCHEMA,
+                "source": "faster-whisper:tiny",
+                "language": "en",
+                "timing": "authored",
+                "cues": [
+                    {
+                        "start": 0.0,
+                        "end": 2.2,
+                        "text": "alpha beta gamma delta.",
+                        "words": [
+                            {"start": 0.0, "end": 0.3, "text": "alpha"},
+                            {"start": 0.4, "end": 0.7, "text": "beta"},
+                            {"start": 0.8, "end": 1.1, "text": "gamma"},
+                            {"start": 1.2, "end": 1.6, "text": "delta."},
+                        ],
+                    },
+                    {
+                        "start": 2.3,
+                        "end": 4.0,
+                        "text": "beta gamma delta. extra",
+                        "words": [],
+                    },
+                ],
+            }
+        )
+    )
+    cues, _source, _language = load_lyrics(source, duration=30)
+    assert [cue["text"] for cue in cues] == [
+        "alpha beta gamma delta.",
+        "beta gamma delta. extra",
+    ]
+    assert [word["start"] for word in cues[0]["words"]] == [0.0, 0.4, 0.8, 1.2]

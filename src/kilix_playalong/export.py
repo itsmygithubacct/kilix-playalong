@@ -27,8 +27,9 @@ def _tab_system(events: list[TabEvent], labels: list[str]) -> str:
 def _clock(seconds: float) -> str:
     """Minute and second to two decimals, carrying when the second field would be 60.
 
-    Same rounding as `tablature.timestamp`, one decimal place coarser, so a
-    printable and an ASCII tab do not disagree about which minute a note is in.
+    Same tick rounding as `tablature.timestamp`. This clock is one decimal
+    coarser, so it can cross a minute while the three-decimal clock is still
+    in the previous one.
     """
 
     return _clock_text(seconds, 2)

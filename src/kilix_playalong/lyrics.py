@@ -491,8 +491,10 @@ def _merge_pair(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
     # A rolling caption repeats the line already showing and then adds words.
     # Joining the whole cue pastes that line on twice. `added` is only the
     # new words; "" means the cue is the repeated line and nothing more.
-    # Cues that carry their own word timings are not captions of this shape.
-    added = None if cue["words"] else _roll_addition(previous["text"], cue["text"])
+    # A cue that already has word timings is not a caption of this shape.
+    added = (
+        None if previous["words"] or cue["words"] else _roll_addition(previous["text"], cue["text"])
+    )
     if added == "" and (
         gap <= _MERGE_GAP_SECONDS or cue["start"] - previous["start"] < _SIMULTANEOUS_SECONDS
     ):
@@ -592,11 +594,16 @@ def _joined_caption(previous: str, following: str, added: str | None) -> str:
 def _detached_roll(previous: LyricCue, cue: LyricCue) -> LyricCue | None:
     """The new words of a roll that did not fit on the line already open.
 
-    ``_merge_pair`` returns None for that pair. Leaving the cue as it arrived
-    puts the previous line's last words at the start of this one.
+    A pair on the same instant is left whole: the earlier cue is about to
+    lose its span, and it is the only other copy of the repeated words.
+    A cue that already has word timings is not a caption of this shape.
     """
 
-    if cue["words"] or cue["start"] - previous["end"] > _MERGE_GAP_SECONDS:
+    if previous["words"] or cue["words"]:
+        return None
+    if cue["start"] - previous["start"] < _SIMULTANEOUS_SECONDS:
+        return None
+    if cue["start"] - previous["end"] > _MERGE_GAP_SECONDS:
         return None
     added = _roll_addition(previous["text"], cue["text"])
     if not added:
