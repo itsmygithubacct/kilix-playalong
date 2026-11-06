@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.3rc5"
 PROJECT_SCHEMA = "kilix.playalong.project/v1"
 LYRICS_SCHEMA = "kilix.playalong.lyrics/v1"
 TAB_SCHEMA = "kilix.playalong.tab/v1"
