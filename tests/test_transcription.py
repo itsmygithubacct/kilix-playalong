@@ -35,7 +35,7 @@ from typing import Any
 import pytest
 
 from kilix_playalong import _whisper_worker as worker
-from kilix_playalong import alignment, text
+from kilix_playalong import alignment, licensed, text
 from kilix_playalong.errors import InvalidInputError, ProviderUnavailableError
 from kilix_playalong.providers import transcription
 from kilix_playalong.runner import CommandResult
@@ -61,13 +61,12 @@ _needs_ctranslate2 = pytest.mark.skipif(
     ("available_gib", "expected"),
     [
         (16, "large-v3"),
-        (8, "large-v3-turbo"),
-        (4, "medium"),
-        (2, "small"),
+        (10, "large-v3"),
+        (8, "medium.en"),
+        (2, "medium.en"),
     ],
 )
 def test_auto_model_adapts_to_available_memory(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     available_gib: int,
     expected: str,
@@ -79,72 +78,53 @@ def test_auto_model_adapts_to_available_memory(
         lambda: available_gib * 1024**3,
     )
 
-    assert (
-        transcription.resolve_model(
-            "auto",
-            device="auto",
-            model_cache=tmp_path,
-            allow_model_downloads=True,
-        )
-        == expected
-    )
+    assert transcription.resolve_model("auto", device="auto") == expected
 
 
-def test_auto_model_prefers_large_v3_on_cuda(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_auto_model_prefers_large_v3_on_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(transcription, "cuda_available", lambda: True)
     monkeypatch.setattr(transcription, "_available_memory_bytes", lambda: 1024**3)
 
-    assert (
-        transcription.resolve_model(
-            "auto",
-            device="auto",
-            model_cache=tmp_path,
-            allow_model_downloads=True,
-        )
-        == "large-v3"
-    )
+    assert transcription.resolve_model("auto", device="auto") == "large-v3"
 
 
-def test_auto_model_uses_strongest_compatible_cached_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_auto_model_uses_the_strongest_installed_licensed_model(
+    monkeypatch: pytest.MonkeyPatch, licensed_store: object
 ) -> None:
     monkeypatch.setattr(transcription, "cuda_available", lambda: False)
     monkeypatch.setattr(transcription, "_available_memory_bytes", lambda: 16 * 1024**3)
-    snapshot = (
-        tmp_path / "models--Systran--faster-whisper-medium" / "snapshots" / "fixture-revision"
-    )
-    snapshot.mkdir(parents=True)
-    (snapshot / "model.bin").write_bytes(b"fixture")
+    licensed_store.remove(licensed.WHISPER_LARGE_V3)  # type: ignore[attr-defined]
 
-    assert (
-        transcription.resolve_model(
-            "auto",
-            device="cpu",
-            model_cache=tmp_path,
-            allow_model_downloads=False,
-        )
-        == "medium"
-    )
+    assert transcription.resolve_model("auto", device="cpu") == "medium.en"
 
 
-def test_auto_model_requires_download_permission_without_cache(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_auto_model_names_the_install_command_when_nothing_is_installed(
+    monkeypatch: pytest.MonkeyPatch, licensed_store: object
 ) -> None:
     monkeypatch.setattr(transcription, "cuda_available", lambda: False)
     monkeypatch.setattr(transcription, "_available_memory_bytes", lambda: 16 * 1024**3)
+    for model in licensed.WHISPER.values():
+        licensed_store.remove(model)  # type: ignore[attr-defined]
 
-    with pytest.raises(ProviderUnavailableError, match="--allow-model-downloads"):
-        transcription.resolve_model(
-            "auto",
-            device="cpu",
-            model_cache=tmp_path,
-            allow_model_downloads=False,
-        )
+    with pytest.raises(ProviderUnavailableError, match="kilix-playalong models install"):
+        transcription.resolve_model("auto", device="cpu")
+
+
+def test_auto_never_picks_large_v3_where_memory_cannot_carry_it(
+    monkeypatch: pytest.MonkeyPatch, licensed_store: object
+) -> None:
+    """Only large-v3 installed, 4 GiB free, no GPU: auto picks nothing.
+
+    medium.en is the only candidate there, so auto names the install command
+    instead of quietly running the large model on a machine it would swamp.
+    """
+    monkeypatch.setattr(transcription, "cuda_available", lambda: False)
+    monkeypatch.setattr(transcription, "_available_memory_bytes", lambda: 4 * 1024**3)
+    licensed_store.remove(licensed.WHISPER_MEDIUM_EN)  # type: ignore[attr-defined]
+
+    with pytest.raises(ProviderUnavailableError, match="no licensed Whisper model"):
+        transcription.resolve_model("auto", device="cpu")
+    assert transcription.resolve_model("large-v3", device="cpu") == "large-v3"
 
 
 def test_an_unsupported_model_is_a_user_error_not_a_missing_package(tmp_path: Path) -> None:
@@ -152,21 +132,25 @@ def test_an_unsupported_model_is_a_user_error_not_a_missing_package(tmp_path: Pa
 
     ``errors.py`` separates "input failed validation" from "an optional package or
     model is unavailable", and a model name this build never had is the first of
-    those: no install, no download and no ``--allow-model-downloads`` makes
-    "larj-v3" resolvable. Both doors into the provider are checked because the
-    pipeline reaches ``resolve_model`` directly when it keys the lyrics stage and
-    ``transcribe`` when it runs it, and a caller that catches one class at one door
-    and the other at the other has no rule it can state.
+    those: no install makes "larj-v3" resolvable. Both doors into the provider are
+    checked because the pipeline reaches ``resolve_model`` directly when it keys the
+    lyrics stage and ``transcribe`` when it runs it.
     """
     with pytest.raises(InvalidInputError, match="unsupported faster-whisper model"):
-        transcription.resolve_model(
-            "larj-v3",
-            device="cpu",
-            model_cache=tmp_path,
-            allow_model_downloads=True,
-        )
+        transcription.resolve_model("larj-v3", device="cpu")
     with pytest.raises(InvalidInputError, match="unsupported faster-whisper model"):
         transcription.transcribe(tmp_path / "vocals.wav", tmp_path / "lyrics.json", model="larj-v3")
+
+
+def test_a_model_an_older_release_ran_is_refused_with_the_choices_left() -> None:
+    """``small`` still validates, so a project that stored it resumes; it cannot run.
+
+    It has no kilix-license record, so naming it is a missing model, not bad input.
+    """
+    assert "small" in transcription.MODEL_CHOICES
+    assert "small" not in transcription.OFFERED_MODELS
+    with pytest.raises(ProviderUnavailableError, match="auto, large-v3, medium.en"):
+        transcription.resolve_model("small", device="cuda")
 
 
 @_needs_ctranslate2
@@ -206,16 +190,10 @@ def test_asking_where_the_weights_live_creates_nothing(private_homes: Path) -> N
     assert not transcription.model_cache_path().exists()
 
 
-def test_explicit_model_is_never_replaced(tmp_path: Path) -> None:
-    assert (
-        transcription.resolve_model(
-            "small",
-            device="cuda",
-            model_cache=tmp_path,
-            allow_model_downloads=True,
-        )
-        == "small"
-    )
+def test_explicit_model_is_never_replaced(licensed_store: object) -> None:
+    licensed_store.remove(licensed.WHISPER_MEDIUM_EN)  # type: ignore[attr-defined]
+    # Returned as asked even when not installed: the stage's verify is what refuses.
+    assert transcription.resolve_model("medium.en", device="cuda") == "medium.en"
 
 
 # ---------------------------------------------------------------------------
@@ -844,7 +822,7 @@ def test_an_unusable_confidence_reads_as_no_confidence_not_as_certainty(text: st
 )
 def test_a_written_confidence_is_a_real_probability(confidence: float, expected: str) -> None:
     rendered = transcription.format_receipt(
-        model="small",
+        model="large-v3",
         audio_source="vocals",
         audio_from="requested",
         language="en",
@@ -935,7 +913,7 @@ def test_transcribe_defaults_to_the_vocal_stem(
     output = tmp_path / "lyrics.json"
     output.write_text("{}")
 
-    transcription.transcribe(_audio(tmp_path, "vocals.wav"), output, model="small")
+    transcription.transcribe(_audio(tmp_path, "vocals.wav"), output, model="large-v3")
 
     assert runner.arguments[runner.arguments.index("--audio-source") + 1] == "vocals"
     assert "--mix" not in runner.arguments
@@ -952,7 +930,7 @@ def test_transcribe_passes_both_sources_for_automatic_selection(
     transcription.transcribe(
         _audio(tmp_path, "vocals.wav"),
         output,
-        model="small",
+        model="large-v3",
         audio_source="auto",
         mix=mix,
         timeout=600,
@@ -972,7 +950,7 @@ def test_automatic_selection_needs_the_full_mix(
         transcription.transcribe(
             _audio(tmp_path, "vocals.wav"),
             tmp_path / "lyrics.json",
-            model="small",
+            model="large-v3",
             audio_source="auto",
         )
     assert runner.calls == 0
@@ -985,7 +963,7 @@ def test_an_unknown_audio_source_is_rejected(
         transcription.transcribe(
             _audio(tmp_path, "vocals.wav"),
             tmp_path / "lyrics.json",
-            model="small",
+            model="large-v3",
             audio_source="karaoke",
         )
     assert runner.calls == 0
@@ -998,7 +976,7 @@ def test_the_worker_argv_keeps_the_model_directly_after_the_output_path(
     output.write_text("{}")
     source = _audio(tmp_path, "vocals.wav")
 
-    transcription.transcribe(source, output, model="small")
+    transcription.transcribe(source, output, model="large-v3")
 
     model_index = runner.arguments.index("--model")
     assert runner.arguments[model_index - 1] == str(output.resolve())
@@ -1017,12 +995,54 @@ def test_the_worker_is_handed_the_cache_path_everyone_else_reads(
     output = tmp_path / "lyrics.json"
     output.write_text("{}")
 
-    transcription.transcribe(_audio(tmp_path, "vocals.wav"), output, model="small")
+    transcription.transcribe(_audio(tmp_path, "vocals.wav"), output, model="large-v3")
 
     expected = str(transcription.model_cache_path())
     assert runner.arguments[runner.arguments.index("--cache") + 1] == expected
     assert runner.env["HF_HOME"] == expected
     assert transcription.model_cache_path().is_dir()
+
+
+def test_the_worker_loads_the_verified_asset_offline(
+    tmp_path: Path, private_homes: Path, runner: _RecordingRunner, licensed_store: object
+) -> None:
+    """The directory ``kilix models verify`` reported, and no route to a download."""
+    output = tmp_path / "lyrics.json"
+    output.write_text("{}")
+
+    transcription.transcribe(_audio(tmp_path, "vocals.wav"), output, model="medium.en")
+
+    expected = licensed_store.root / "assets" / "faster-whisper-medium-en"  # type: ignore[attr-defined]
+    assert runner.arguments[runner.arguments.index("--model-path") + 1] == str(expected.resolve())
+    assert runner.arguments[runner.arguments.index("--model") + 1] == "medium.en"
+    assert ("verify", "faster-whisper-medium-en") in licensed_store.calls  # type: ignore[attr-defined]
+    assert runner.env["HF_HUB_OFFLINE"] == "1"
+    for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        assert runner.env[name] == "http://127.0.0.1:9"
+
+
+def test_an_unverified_model_never_reaches_the_worker(
+    tmp_path: Path, private_homes: Path, runner: _RecordingRunner, licensed_store: object
+) -> None:
+    licensed_store.refuse(licensed.WHISPER_LARGE_V3)  # type: ignore[attr-defined]
+
+    with pytest.raises(
+        ProviderUnavailableError, match="kilix models install faster-whisper-large-v3"
+    ):
+        transcription.transcribe(
+            _audio(tmp_path, "vocals.wav"), tmp_path / "l.json", model="large-v3"
+        )
+    assert runner.calls == 0
+
+
+def test_an_english_only_model_refuses_another_language_before_the_worker(
+    tmp_path: Path, private_homes: Path, runner: _RecordingRunner
+) -> None:
+    with pytest.raises(ProviderUnavailableError, match="--large-v3"):
+        transcription.transcribe(
+            _audio(tmp_path, "vocals.wav"), tmp_path / "l.json", model="medium.en", language="pt"
+        )
+    assert runner.calls == 0
 
 
 @pytest.mark.parametrize(
@@ -1040,7 +1060,7 @@ def test_a_language_tag_is_reduced_to_the_subtag_whisper_understands(
     output.write_text("{}")
 
     transcription.transcribe(
-        _audio(tmp_path, "vocals.wav"), output, model="small", language=requested
+        _audio(tmp_path, "vocals.wav"), output, model="large-v3", language=requested
     )
 
     assert runner.arguments[runner.arguments.index("--language") + 1] == expected
@@ -1054,7 +1074,7 @@ def test_a_language_that_could_be_read_as_an_option_never_reaches_the_worker(
         transcription.transcribe(
             _audio(tmp_path, "vocals.wav"),
             tmp_path / "lyrics.json",
-            model="small",
+            model="large-v3",
             language=value,
         )
     assert runner.calls == 0
@@ -1064,7 +1084,9 @@ def test_missing_audio_is_refused_before_a_subprocess_is_spawned(
     tmp_path: Path, private_homes: Path, runner: _RecordingRunner
 ) -> None:
     with pytest.raises(InvalidInputError, match="vocal stem"):
-        transcription.transcribe(tmp_path / "absent.wav", tmp_path / "lyrics.json", model="small")
+        transcription.transcribe(
+            tmp_path / "absent.wav", tmp_path / "lyrics.json", model="large-v3"
+        )
     assert runner.calls == 0
 
 
@@ -1077,7 +1099,7 @@ def test_an_unusable_timeout_is_a_user_error_not_a_value_error(
         transcription.transcribe(
             _audio(tmp_path, "vocals.wav"),
             tmp_path / "lyrics.json",
-            model="small",
+            model="large-v3",
             audio_source="auto",
             mix=_audio(tmp_path, "normalized.wav"),
             timeout=timeout,

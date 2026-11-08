@@ -8,18 +8,16 @@ from pathlib import Path
 
 
 def main() -> int:
-    if len(sys.argv) != 4:
-        print("usage: _basic_pitch_worker INPUT OUTPUT.mid OUTPUT.json", file=sys.stderr)
+    if len(sys.argv) != 5:
+        print("usage: _basic_pitch_worker INPUT OUTPUT.mid OUTPUT.json MODEL.onnx", file=sys.stderr)
         return 2
-    source, midi_path, notes_path = map(Path, sys.argv[1:])
-    import basic_pitch
+    source, midi_path, notes_path, model_path = map(Path, sys.argv[1:])
+    # The licensed asset the provider just verified, never the wheel's own copy.
+    if not model_path.is_absolute() or not model_path.is_file():
+        print("the Basic Pitch model path is not an existing absolute file", file=sys.stderr)
+        return 2
     from basic_pitch.inference import Model, predict
 
-    model_path = (
-        Path(basic_pitch.__file__).resolve().parent / "saved_models" / "icassp_2022" / "nmp.onnx"
-    )
-    if not model_path.is_file():
-        raise RuntimeError("the locked Basic Pitch package does not contain its ONNX model")
     model = Model(model_path)
     _, midi, events = predict(
         source,

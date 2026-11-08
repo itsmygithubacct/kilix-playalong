@@ -37,6 +37,14 @@ def test_basic_pitch_onnx_transcribes_a_synthetic_tone(tmp_path: Path) -> None:
 
     midi = tmp_path / "tone.mid"
     notes = tmp_path / "notes.json"
+    # Stands in for the licensed asset the provider verifies: the asset pins
+    # these same bytes (sha256 2c3c1d14...), and the worker loads only the path
+    # it is handed.
+    import basic_pitch
+
+    model = (
+        Path(basic_pitch.__file__).resolve().parent / "saved_models" / "icassp_2022" / "nmp.onnx"
+    )
     result = subprocess.run(
         [
             sys.executable,
@@ -45,6 +53,7 @@ def test_basic_pitch_onnx_transcribes_a_synthetic_tone(tmp_path: Path) -> None:
             str(source),
             str(midi),
             str(notes),
+            str(model),
         ],
         check=False,
         capture_output=True,
@@ -56,3 +65,25 @@ def test_basic_pitch_onnx_transcribes_a_synthetic_tone(tmp_path: Path) -> None:
     document = json.loads(notes.read_text())
     assert document["provider"] == "basic-pitch-onnx-0.4.0"
     assert document["notes"]
+
+
+def test_the_worker_refuses_a_model_path_it_cannot_load(tmp_path: Path) -> None:
+    for model in ("nmp.onnx", str(tmp_path / "absent.onnx")):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "kilix_playalong._basic_pitch_worker",
+                str(tmp_path / "in.wav"),
+                str(tmp_path / "out.mid"),
+                str(tmp_path / "out.json"),
+                model,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert result.returncode == 2, model
+        assert "model path" in result.stderr
+        assert not (tmp_path / "out.mid").exists()

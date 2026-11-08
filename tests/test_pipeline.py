@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import json
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+from typing import Any
 
 import mido
 import pytest
 from test_source import make_tone, make_uslt_mp3, requires_ffmpeg
 
-from kilix_playalong import LYRICS_SCHEMA
+from kilix_playalong import LYRICS_SCHEMA, licensed
 from kilix_playalong.errors import (
     InvalidInputError,
     ProviderFailedError,
@@ -272,27 +273,36 @@ def _fingerprint(provider: str, inputs: object) -> str:
     return sha256_bytes(canonical_json({"provider": provider, "inputs": inputs}))
 
 
-_WHISPER_REPOSITORIES = {
-    "large-v3": "Systran--faster-whisper-large-v3",
-    "large-v3-turbo": "mobiuslabsgmbh--faster-whisper-large-v3-turbo",
-    "medium": "Systran--faster-whisper-medium",
-    "small": "Systran--faster-whisper-small",
-}
+_STORE: list[Any] = []
 
 
-def _whisper_model_directory(model: str) -> Path:
-    return transcription.model_cache_path() / f"models--{_WHISPER_REPOSITORIES[model]}"
+@pytest.fixture(autouse=True)
+def _no_whisper_installed(licensed_store: Any) -> Iterator[None]:
+    """Start every test here with no licensed Whisper model installed.
+
+    Demucs and Basic Pitch stay installed (their providers are replaced by stand-ins
+    anyway); which Whisper models are present is what most of these tests are about.
+    """
+    for model in licensed.WHISPER.values():
+        licensed_store.remove(model)
+    _STORE.append(licensed_store)
+    yield
+    _STORE.clear()
 
 
 def _cache_whisper_model(model: str) -> None:
-    """Make one faster-whisper model look locally cached to the adaptive resolver."""
-    snapshot = _whisper_model_directory(model) / "snapshots" / "fixture-revision"
-    private_write(snapshot / "model.bin", b"synthetic weights")
+    """Install one licensed Whisper model, as `kilix models install` would."""
+    _STORE[-1].add(licensed.WHISPER[model])
 
 
 def _uncache_whisper_model(model: str) -> None:
-    """Prune one model's weights, as a cache clean or a fresh container image would."""
-    shutil.rmtree(_whisper_model_directory(model))
+    """Remove one licensed model's files, as deleting the asset directory would."""
+    _STORE[-1].remove(licensed.WHISPER[model])
+
+
+def _uncache_every_whisper_model() -> None:
+    for model in licensed.WHISPER:
+        _uncache_whisper_model(model)
 
 
 def _pin_hardware(
@@ -356,7 +366,6 @@ def test_synthetic_pipeline_resumes_and_invalidates_by_settings(
     options = PipelineOptions(
         url="https://youtu.be/abcdef12345",
         lyrics_path=lyrics,
-        allow_model_downloads=False,
         rights_confirmed=True,
     )
     project_dir, manifest = run_new(options)
@@ -408,9 +417,10 @@ def test_fingering_version_change_reuses_audio_and_pitch_work(
     from kilix_playalong import pipeline
 
     calls, _ = _install_providers(monkeypatch)
+    _cache_whisper_model("medium.en")
     current_version = pipeline.FINGERING_VERSION
     monkeypatch.setattr(pipeline, "FINGERING_VERSION", current_version - 1)
-    options = PipelineOptions(url=_URL, rights_confirmed=True, whisper_model="small")
+    options = PipelineOptions(url=_URL, rights_confirmed=True, whisper_model="medium.en")
     project, _ = run_new(options)
     monkeypatch.setattr(pipeline, "FINGERING_VERSION", current_version)
     statuses: list[tuple[str, str]] = []
@@ -434,12 +444,13 @@ def test_note_cleaning_options_rerun_tablature_and_leave_the_pitches(
     """
 
     calls, _models = _install_providers(monkeypatch)
-    options = PipelineOptions(url=_URL, rights_confirmed=True, whisper_model="small")
+    _cache_whisper_model("medium.en")
+    options = PipelineOptions(url=_URL, rights_confirmed=True, whisper_model="medium.en")
     project, _manifest = run_new(options)
     wider = PipelineOptions(
         url=options.url,
         rights_confirmed=True,
-        whisper_model="small",
+        whisper_model="medium.en",
         max_polyphony=6,
     )
     statuses: list[tuple[str, str]] = []
@@ -452,7 +463,7 @@ def test_note_cleaning_options_rerun_tablature_and_leave_the_pitches(
     stricter = PipelineOptions(
         url=options.url,
         rights_confirmed=True,
-        whisper_model="small",
+        whisper_model="medium.en",
         max_polyphony=6,
         note_confidence=0.4,
     )
@@ -465,32 +476,29 @@ def test_note_cleaning_options_rerun_tablature_and_leave_the_pitches(
     assert calls["pitch"] == 1
 
 
-def test_lyrics_stage_reruns_when_model_downloads_are_allowed(
+def test_lyrics_stage_reruns_when_large_v3_is_installed_later(
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
     project_dir, manifest = run_new(options)
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
     assert manifest["lyrics"] is not None
-    assert _recorded_model(manifest) == "small"
+    assert _recorded_model(manifest) == "medium.en"
 
+    _cache_whisper_model("large-v3")
     statuses: list[tuple[str, str]] = []
     upgraded = resume(
         project_dir,
-        PipelineOptions(
-            url=options.url,
-            allow_model_downloads=True,
-            rights_confirmed=True,
-        ),
+        options,
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert ("lyrics", "running") in statuses
-    assert whisper_models == ["small", "large-v3"]
+    assert whisper_models == ["medium.en", "large-v3"]
     assert upgraded["lyrics"] is not None
     assert _recorded_model(upgraded) == "large-v3"
     assert calls["separate"] == 1
@@ -498,15 +506,11 @@ def test_lyrics_stage_reruns_when_model_downloads_are_allowed(
     statuses.clear()
     resume(
         project_dir,
-        PipelineOptions(
-            url=options.url,
-            allow_model_downloads=True,
-            rights_confirmed=True,
-        ),
+        options,
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["small", "large-v3"]
+    assert whisper_models == ["medium.en", "large-v3"]
 
 
 def test_lyrics_stage_survives_a_cleared_model_cache(
@@ -515,13 +519,13 @@ def test_lyrics_stage_survives_a_cleared_model_cache(
 ) -> None:
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
     project_dir, _manifest = run_new(options)
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
-    shutil.rmtree(transcription.model_cache_path())
+    _uncache_every_whisper_model()
     statuses: list[tuple[str, str]] = []
     unchanged = resume(
         project_dir,
@@ -529,9 +533,9 @@ def test_lyrics_stage_survives_a_cleared_model_cache(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
     assert unchanged["lyrics"] is not None
-    assert _recorded_model(unchanged) == "small"
+    assert _recorded_model(unchanged) == "medium.en"
     assert calls["pitch"] == 1
 
 
@@ -541,14 +545,14 @@ def test_lyrics_stage_reruns_when_an_adaptive_resume_finds_a_gpu(
 ) -> None:
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=4 * _GIB, cuda=False)
-    _cache_whisper_model("medium")
+    _cache_whisper_model("medium.en")
     _cache_whisper_model("large-v3")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
     project_dir, manifest = run_new(options)
-    assert whisper_models == ["medium"]
+    assert whisper_models == ["medium.en"]
     assert manifest["lyrics"] is not None
-    assert _recorded_model(manifest) == "medium"
+    assert _recorded_model(manifest) == "medium.en"
 
     _pin_hardware(monkeypatch, available_memory=4 * _GIB, cuda=True)
     statuses: list[tuple[str, str]] = []
@@ -558,7 +562,7 @@ def test_lyrics_stage_reruns_when_an_adaptive_resume_finds_a_gpu(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert ("lyrics", "running") in statuses
-    assert whisper_models == ["medium", "large-v3"]
+    assert whisper_models == ["medium.en", "large-v3"]
     assert upgraded["lyrics"] is not None
     assert _recorded_model(upgraded) == "large-v3"
     assert calls["separate"] == 1
@@ -570,7 +574,7 @@ def test_lyrics_stage_keeps_a_stronger_recorded_whisper_model(
 ) -> None:
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("medium")
+    _cache_whisper_model("medium.en")
     _cache_whisper_model("large-v3")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
@@ -598,7 +602,7 @@ def test_a_lyrics_rerun_obeys_the_providers_memory_policy(
     """A recorded model may outrank this machine in the key, but never in the run."""
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("medium")
+    _cache_whisper_model("medium.en")
     _cache_whisper_model("large-v3")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
@@ -616,9 +620,9 @@ def test_a_lyrics_rerun_obeys_the_providers_memory_policy(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert ("lyrics", "running") in statuses
-    assert whisper_models == ["large-v3", "medium"]
+    assert whisper_models == ["large-v3", "medium.en"]
     assert downgraded["lyrics"] is not None
-    assert _recorded_model(downgraded) == "medium"
+    assert _recorded_model(downgraded) == "medium.en"
     assert calls["pitch"] == 2
 
     # ...and the stage settles on what it ran: one re-run, not a second one afterwards.
@@ -629,7 +633,7 @@ def test_a_lyrics_rerun_obeys_the_providers_memory_policy(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["large-v3", "medium"]
+    assert whisper_models == ["large-v3", "medium.en"]
     assert calls["pitch"] == 2
 
 
@@ -637,35 +641,21 @@ def test_an_offline_resume_transcribes_with_weights_that_are_present(
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Pruned weights must not be pinned into a resume that has no way to fetch them."""
+    """A removed model must not be pinned into a resume that can no longer verify it."""
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    cached_worker = _synthetic_whisper_worker(whisper_models)
-
-    def offline_worker(arguments: Sequence[str], **kwargs: object) -> CommandResult:
-        """Stand in for HF_HUB_OFFLINE: uncached weights cannot be fetched."""
-        environment = kwargs.get("env")
-        offline = isinstance(environment, dict) and environment.get("HF_HUB_OFFLINE") == "1"
-        model = arguments[arguments.index("--model") + 1]
-        if offline and not transcription._is_cached(transcription.model_cache_path(), model):
-            raise ProviderFailedError("faster-whisper worker could not fetch model weights")
-        return cached_worker(arguments, **kwargs)
-
-    monkeypatch.setattr("kilix_playalong.providers.transcription.run_command", offline_worker)
+    _cache_whisper_model("large-v3")
 
     project_dir, first = run_new(
-        PipelineOptions(
-            url="https://youtu.be/abcdef12345",
-            allow_model_downloads=True,
-            rights_confirmed=True,
-        )
+        PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
     )
     assert whisper_models == ["large-v3"]
     assert first["lyrics"] is not None
     assert _recorded_model(first) == "large-v3"
 
-    # The big weights are pruned, only `small` survives, and the resume is offline.
-    _cache_whisper_model("small")
+    # large-v3 is removed, only medium.en is installed, and the transcript is gone.
+    _uncache_whisper_model("large-v3")
+    _cache_whisper_model("medium.en")
     (project_dir / "lyrics" / "lyrics.json").unlink()
     statuses: list[tuple[str, str]] = []
     resumed = resume(
@@ -674,9 +664,9 @@ def test_an_offline_resume_transcribes_with_weights_that_are_present(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert ("lyrics", "done") in statuses
-    assert whisper_models == ["large-v3", "small"]
+    assert whisper_models == ["large-v3", "medium.en"]
     assert resumed["lyrics"] is not None
-    assert _recorded_model(resumed) == "small"
+    assert _recorded_model(resumed) == "medium.en"
     assert all(stage["status"] == "done" for stage in resumed["stages"].values())
     assert calls["pitch"] == 2
 
@@ -693,18 +683,18 @@ def test_an_unresolvable_rerun_fails_before_launching_a_worker(
     """
     _calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
     project_dir, _manifest = run_new(options)
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
-    shutil.rmtree(transcription.model_cache_path())
+    _uncache_every_whisper_model()
     (project_dir / "lyrics" / "lyrics.json").unlink()
-    with pytest.raises(ProviderUnavailableError, match="--allow-model-downloads"):
+    with pytest.raises(ProviderUnavailableError, match="kilix-playalong models install"):
         resume(project_dir, options)
 
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
     assert load_manifest(project_dir)["stages"]["lyrics"]["status"] == "error"
 
 
@@ -715,7 +705,7 @@ def test_an_explicit_whisper_model_is_the_model_that_runs(
     """`--whisper-model` wins outright over an adaptive key, in both directions."""
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("medium")
+    _cache_whisper_model("medium.en")
     _cache_whisper_model("large-v3")
     adaptive = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
@@ -724,7 +714,7 @@ def test_an_explicit_whisper_model_is_the_model_that_runs(
 
     explicit = PipelineOptions(
         url=adaptive.url,
-        whisper_model="medium",
+        whisper_model="medium.en",
         rights_confirmed=True,
     )
     statuses: list[tuple[str, str]] = []
@@ -734,9 +724,9 @@ def test_an_explicit_whisper_model_is_the_model_that_runs(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert ("lyrics", "running") in statuses
-    assert whisper_models == ["large-v3", "medium"]
+    assert whisper_models == ["large-v3", "medium.en"]
     assert downgraded["lyrics"] is not None
-    assert _recorded_model(downgraded) == "medium"
+    assert _recorded_model(downgraded) == "medium.en"
 
     statuses.clear()
     resume(
@@ -745,7 +735,7 @@ def test_an_explicit_whisper_model_is_the_model_that_runs(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["large-v3", "medium"]
+    assert whisper_models == ["large-v3", "medium.en"]
 
     # Handing the same machine back to `auto` re-transcribes only if `auto` wants something
     # better, so naming the model `auto` would have picked anyway costs nothing.
@@ -757,7 +747,7 @@ def test_an_explicit_whisper_model_is_the_model_that_runs(
         progress=lambda name, status, _detail: statuses.append((name, status)),
     )
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["large-v3", "medium"]
+    assert whisper_models == ["large-v3", "medium.en"]
     assert calls["pitch"] == 2
 
 
@@ -829,7 +819,7 @@ def test_a_better_recorded_model_survives_a_gpu_arriving_with_the_weights_pruned
     """
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=16 * _GIB, cuda=False)
-    _cache_whisper_model("medium")
+    _cache_whisper_model("medium.en")
     _cache_whisper_model("large-v3")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
 
@@ -882,19 +872,17 @@ def test_the_lyrics_key_ranks_a_better_model_above_a_better_device(
     """Acceptance is lexicographic over (model, device), model-major -- not componentwise."""
     _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=4 * _GIB, cuda=True)
-    _cache_whisper_model("medium")
+    _cache_whisper_model("medium.en")
     adaptive = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
     project_dir, manifest = create_project(adaptive)
 
     key, alternates = Pipeline(project_dir, manifest, adaptive)._whisper_keys(_TRANSCRIBE)
-    assert key == {"model": "medium", "device": "cuda", "audio": "vocals"}
+    assert key == {"model": "medium.en", "device": "cuda", "audio": "vocals"}
     # A strictly better model is kept from either device; an equal model on the worse device
     # is not, so a GPU appearing still re-runs when it is the only thing that changed.
     assert {(value["model"], value["device"]) for value in alternates} == {
         ("large-v3", "cuda"),
         ("large-v3", "cpu"),
-        ("large-v3-turbo", "cuda"),
-        ("large-v3-turbo", "cpu"),
     }
 
     # A pinned device still means exactly itself in both directions: the cross-dimension
@@ -903,34 +891,33 @@ def test_the_lyrics_key_ranks_a_better_model_above_a_better_device(
     _key, pinned_alternates = Pipeline(project_dir, manifest, pinned)._whisper_keys(_TRANSCRIBE)
     assert {(value["model"], value["device"]) for value in pinned_alternates} == {
         ("large-v3", "cuda"),
-        ("large-v3-turbo", "cuda"),
     }
 
 
-def test_an_unranked_explicit_whisper_model_stands_in_for_nothing(
+def test_an_explicit_whisper_model_stands_in_for_nothing_better(
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A model outside the provider's adaptive order is comparable only with itself.
+    """A requested model is comparable only with itself, even below a better installed one.
 
-    `--whisper-model base` is a supported model the adaptive quality order never mentions.
-    Nothing may stand in for it -- not even `large-v3`, which this box could run and which
-    tops that order -- because the two are simply not ranked against each other.
+    `--whisper-model medium.en` with large-v3 installed and affordable: nothing may stand in
+    for the request -- not even `large-v3`, which tops the adaptive order -- because a pin
+    means exactly what it says. Only the device, still on `auto`, may relax.
     """
     _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
+    _cache_whisper_model("medium.en")
     _cache_whisper_model("large-v3")
     options = PipelineOptions(
         url="https://youtu.be/abcdef12345",
-        whisper_model="base",
+        whisper_model="medium.en",
         rights_confirmed=True,
     )
     project_dir, manifest = create_project(options)
 
     key, alternates = Pipeline(project_dir, manifest, options)._whisper_keys(_TRANSCRIBE)
-    assert key == {"model": "base", "device": "cpu", "audio": "vocals"}
-    assert {(value["model"], value["device"]) for value in alternates} == {("base", "cuda")}
-    assert all(value["model"] == "base" for value in alternates)
+    assert key == {"model": "medium.en", "device": "cpu", "audio": "vocals"}
+    assert {(value["model"], value["device"]) for value in alternates} == {("medium.en", "cuda")}
 
 
 def test_the_lyrics_key_accepts_only_configurations_that_are_no_worse(
@@ -945,28 +932,26 @@ def test_the_lyrics_key_accepts_only_configurations_that_are_no_worse(
     """
     _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=4 * _GIB, cuda=False)
-    _cache_whisper_model("medium")
+    _cache_whisper_model("medium.en")
     adaptive = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
     project_dir, manifest = create_project(adaptive)
 
     key, alternates = Pipeline(project_dir, manifest, adaptive)._whisper_keys(_TRANSCRIBE)
-    assert key == {"model": "medium", "device": "cpu", "audio": "vocals"}
+    assert key == {"model": "medium.en", "device": "cpu", "audio": "vocals"}
     assert {(value["model"], value["device"]) for value in alternates} == {
         ("large-v3", "cpu"),
         ("large-v3", "cuda"),
-        ("large-v3-turbo", "cpu"),
-        ("large-v3-turbo", "cuda"),
-        ("medium", "cuda"),
+        ("medium.en", "cuda"),
     }
 
     pinned = PipelineOptions(
         url=adaptive.url,
-        whisper_model="medium",
+        whisper_model="medium.en",
         device="cpu",
         rights_confirmed=True,
     )
     assert Pipeline(project_dir, manifest, pinned)._whisper_keys(_TRANSCRIBE) == (
-        {"model": "medium", "device": "cpu", "audio": "vocals"},
+        {"model": "medium.en", "device": "cpu", "audio": "vocals"},
         (),
     )
 
@@ -978,7 +963,7 @@ def test_supplied_lyrics_outlive_whisper_option_changes(
 ) -> None:
     calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     lyrics = tmp_path / "lyrics.lrc"
     lyrics.write_text("[00:00.00]Original line\n[00:02.00]Second line\n")
     options = PipelineOptions(
@@ -999,7 +984,6 @@ def test_supplied_lyrics_outlive_whisper_option_changes(
             url=options.url,
             lyrics_path=None,
             whisper_model="large-v3",
-            allow_model_downloads=True,
             rights_confirmed=True,
         ),
         progress=lambda name, status, _detail: statuses.append((name, status)),
@@ -1025,10 +1009,11 @@ def test_the_worker_is_given_the_cache_the_provider_names(
 
     monkeypatch.setattr("kilix_playalong.providers.transcription.is_available", lambda: True)
     monkeypatch.setattr("kilix_playalong.providers.transcription.run_command", fake_worker)
+    _cache_whisper_model("medium.en")
     source = tmp_path / "vocals.wav"
     private_write(source, b"synthetic vocals")
 
-    transcription.transcribe(source, tmp_path / "lyrics.json", model="small")
+    transcription.transcribe(source, tmp_path / "lyrics.json", model="medium.en")
 
     assert captured == [str(transcription.model_cache_path())]
 
@@ -1079,7 +1064,7 @@ def test_a_local_file_flows_through_the_pipeline_like_a_download(
     """Every stage after acquisition must not be able to tell which arm produced the media."""
     calls, whisper_models = _install_providers(monkeypatch, real_probe=True)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     song = make_tone(tmp_path / "song.mp3", title="File Title", artist="File Artist")
 
     project_dir, manifest = run_new(_file_options(song))
@@ -1096,7 +1081,7 @@ def test_a_local_file_flows_through_the_pipeline_like_a_download(
     assert copied.is_file() and sha256_file(copied) == sha256_file(song)
     assert song.is_file(), "the user's library must be exactly as it was"
     assert (project_dir / "exports" / "playalong.html").is_file()
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
     statuses: list[tuple[str, str]] = []
     resume(project_dir, _file_options(song), progress=lambda n, s, _d: statuses.append((n, s)))
@@ -1116,7 +1101,7 @@ def test_a_file_project_resumes_after_the_library_moves(
     """
     _install_providers(monkeypatch, real_probe=True)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     song = make_tone(tmp_path / "song.mp3")
 
     project_dir, _manifest = run_new(_file_options(song))
@@ -1160,7 +1145,7 @@ def test_raising_the_duration_limit_does_not_destroy_a_finished_file_project(
     """
     _install_providers(monkeypatch, real_probe=True)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     song = make_tone(tmp_path / "song.mp3", seconds=3.0)
     project_dir, _manifest = run_new(_file_options(song))
 
@@ -1207,7 +1192,7 @@ def test_resuming_a_project_with_a_different_file_is_refused(
     """The file arm gets the guard the URL arm has always had, in the same words."""
     _install_providers(monkeypatch, real_probe=True)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     song = make_tone(tmp_path / "song.mp3")
     other = make_tone(tmp_path / "other.mp3", seconds=2.0)
 
@@ -1324,7 +1309,7 @@ def test_a_language_change_does_not_re_acquire_a_local_file(
     """
     _install_providers(monkeypatch, real_probe=True)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("large-v3")
     song = make_tone(tmp_path / "song.mp3")
     project_dir, _manifest = run_new(_file_options(song))
     song.unlink()
@@ -1347,7 +1332,7 @@ def test_a_language_change_re_downloads_a_video(
     yt-dlp is asked for, so on the URL arm it really does belong in the acquisition key."""
     _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("large-v3")
     project_dir, _manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
 
     statuses: list[tuple[str, str]] = []
@@ -1371,7 +1356,7 @@ def test_the_youtube_acquisition_key_survived_the_source_union(
     """
     _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
 
     assert manifest["stages"]["download"]["fingerprint"] == _fingerprint(
@@ -1511,9 +1496,9 @@ def test_choosing_the_source_auto_already_resolved_to_changes_nothing(
     """
     _calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     project_dir, _manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
     statuses: list[tuple[str, str]] = []
     resume(
@@ -1522,7 +1507,7 @@ def test_choosing_the_source_auto_already_resolved_to_changes_nothing(
         progress=lambda n, s, _d: statuses.append((n, s)),
     )
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
 
 def test_changing_the_transcribed_audio_re_runs_the_lyrics_stage(
@@ -1537,7 +1522,7 @@ def test_changing_the_transcribed_audio_re_runs_the_lyrics_stage(
     """
     _calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     handed: list[str] = []
     worker = _synthetic_whisper_worker(whisper_models)
 
@@ -1573,20 +1558,20 @@ def test_a_legacy_bare_receipt_still_keeps_a_transcript_through_an_emptied_cache
     """
     _calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url=_URL, rights_confirmed=True)
     project_dir, manifest = run_new(options)
 
     assert manifest["lyrics"] is not None
-    manifest["lyrics"]["source"] = "faster-whisper:small"
+    manifest["lyrics"]["source"] = "faster-whisper:medium.en"
     save_manifest(project_dir, manifest)
-    assert _recorded_model(load_manifest(project_dir)) == "small"
+    assert _recorded_model(load_manifest(project_dir)) == "medium.en"
 
-    shutil.rmtree(transcription.model_cache_path())
+    _uncache_every_whisper_model()
     statuses: list[tuple[str, str]] = []
     resume(project_dir, options, progress=lambda n, s, _d: statuses.append((n, s)))
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1612,12 +1597,12 @@ def test_untimed_supplied_words_are_timed_from_a_transcript(
     """
     _calls, whisper_models = _install_providers(monkeypatch, cues=_TRANSCRIPT_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url=_URL, lyrics_path=_sheet(tmp_path), rights_confirmed=True)
 
     project_dir, manifest = run_new(options)
 
-    assert whisper_models == ["small"], "alignment needs a transcript of the same audio"
+    assert whisper_models == ["medium.en"], "alignment needs a transcript of the same audio"
     assert manifest["lyrics"] is not None
     assert manifest["lyrics"]["source"] == "imported-plain-aligned"
     alignment = manifest["lyrics"]["alignment"]
@@ -1654,7 +1639,7 @@ def test_an_aligned_document_reads_back_as_measured(
     """
     _install_providers(monkeypatch, cues=_TRANSCRIPT_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url=_URL, lyrics_path=_sheet(tmp_path), rights_confirmed=True)
 
     project_dir, _manifest = run_new(options)
@@ -1683,7 +1668,7 @@ def test_a_measured_document_carries_the_report_that_measured_it(
     """
     _install_providers(monkeypatch, cues=_TRANSCRIPT_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url=_URL, lyrics_path=_sheet(tmp_path), rights_confirmed=True)
 
     project_dir, manifest = run_new(options)
@@ -1731,7 +1716,7 @@ def test_a_route_that_brought_its_own_stamps_is_recorded_as_authored(
 
     _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
 
     transcribed_dir, transcribed = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
 
@@ -1755,12 +1740,12 @@ def test_a_rejected_alignment_keeps_the_estimate_and_says_so(
     """
     _calls, whisper_models = _install_providers(monkeypatch, cues=_WRONG_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url=_URL, lyrics_path=_sheet(tmp_path), rights_confirmed=True)
 
     project_dir, manifest = run_new(options)
 
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
     assert manifest["lyrics"] is not None
     assert manifest["lyrics"]["source"] == "imported-plain-estimated"
     alignment = manifest["lyrics"]["alignment"]
@@ -1789,7 +1774,7 @@ def test_a_stage_reports_what_it_did_and_not_only_that_it_finished(
     """
     _install_providers(monkeypatch, cues=_WRONG_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url=_URL, lyrics_path=_sheet(tmp_path), rights_confirmed=True)
 
     events: list[tuple[str, str, str]] = []
@@ -1822,7 +1807,7 @@ def test_a_reported_title_cannot_carry_terminal_escapes(
     """
     _install_providers(monkeypatch, title="Song\x1b[31m TITLE\x07 here")
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
 
     _project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
 
@@ -1860,12 +1845,12 @@ def test_alignment_survives_a_provider_that_will_not_run(
 ) -> None:
     """`is_available()` answers about the import, and that is not the whole question.
 
-    A machine with the `transcribe` extra installed, an empty model cache and no
-    `--allow-model-downloads` passes that check and then raises `ProviderUnavailableError`
-    out of `resolve_model` -- which is the state of the machine this was found on. It is
-    the same "no transcriber will run" case as a missing extra, so it must cost the user
-    the timing they asked for and not the words they supplied. Every other alignment test
-    in this file caches a model first, which is why this one deliberately does not.
+    A machine with the `transcribe` extra installed and no licensed Whisper model passes
+    that check and then raises `ProviderUnavailableError` out of `resolve_model` -- which
+    is the state of the machine this was found on. It is the same "no transcriber will run"
+    case as a missing extra, so it must cost the user the timing they asked for and not the
+    words they supplied. Every other alignment test in this file installs a model first,
+    which is why this one deliberately does not.
     """
     _calls, whisper_models = _install_providers(monkeypatch, cues=_TRANSCRIPT_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
@@ -1880,7 +1865,7 @@ def test_alignment_survives_a_provider_that_will_not_run(
     alignment = manifest["lyrics"]["alignment"]
     assert isinstance(alignment, dict)
     assert alignment["applied"] is False
-    assert "no suitable cached faster-whisper model" in str(alignment["reason"])
+    assert "no licensed Whisper model is installed" in str(alignment["reason"])
     assert "alignment skipped" in manifest["stages"]["lyrics"]["note"]
     document = json.loads((project_dir / "lyrics" / "lyrics.json").read_text())
     assert [cue["text"] for cue in document["cues"]] == [
@@ -1891,13 +1876,13 @@ def test_alignment_survives_a_provider_that_will_not_run(
     # And the improvement is not lost for good: the skipped run recorded the unresolved
     # `auto`/`auto` key, so the moment weights exist the key resolves to something else
     # and the stage runs again.
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     statuses: list[tuple[str, str]] = []
     aligned = resume(project_dir, options, progress=lambda n, s, _d: statuses.append((n, s)))
     assert ("lyrics", "running") in statuses
     assert aligned["lyrics"] is not None
     assert aligned["lyrics"]["source"] == "imported-plain-aligned"
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
 
 def test_a_worker_that_fails_mid_alignment_fails_the_stage_and_is_retried(
@@ -1915,7 +1900,7 @@ def test_a_worker_that_fails_mid_alignment_fails_the_stage_and_is_retried(
     """
     _calls, whisper_models = _install_providers(monkeypatch, cues=_TRANSCRIPT_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     working = transcription.transcribe
     crashed: list[bool] = []
 
@@ -1936,7 +1921,7 @@ def test_a_worker_that_fails_mid_alignment_fails_the_stage_and_is_retried(
     resumed = resume(project_dir, options)
     assert resumed["lyrics"] is not None
     assert resumed["lyrics"]["source"] == "imported-plain-aligned"
-    assert whisper_models == ["small"]
+    assert whisper_models == ["medium.en"]
 
 
 def test_turning_alignment_off_re_runs_the_lyrics_stage(
@@ -1952,7 +1937,7 @@ def test_turning_alignment_off_re_runs_the_lyrics_stage(
     """
     _calls, whisper_models = _install_providers(monkeypatch, cues=_TRANSCRIPT_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     sheet = _sheet(tmp_path)
     aligned = PipelineOptions(url=_URL, lyrics_path=sheet, rights_confirmed=True)
     project_dir, _manifest = run_new(aligned)
@@ -1990,7 +1975,7 @@ def test_turning_alignment_off_re_runs_the_lyrics_stage(
         progress=lambda n, s, _d: statuses.append((n, s)),
     )
     assert all(status == "cached" for _name, status in statuses)
-    assert whisper_models == ["small"], "a timed import never asks for a transcript"
+    assert whisper_models == ["medium.en"], "a timed import never asks for a transcript"
 
 
 #: The lyrics stage fingerprint the run below recorded on the build immediately before
@@ -1999,7 +1984,10 @@ def test_turning_alignment_off_re_runs_the_lyrics_stage(
 #: A literal on purpose: recomputing it from `_lyrics_inputs` would only restate the code
 #: and would move with it, and what this has to catch is a stage key moving because the
 #: artifact's *bytes* changed, which is a mistake this repo has made before.
-_LYRICS_KEY_BEFORE_PROVENANCE = "7ae3ca91a448c89aa06644e5548c694c7d9d94ff498eac98a076ecfff791d6ae"
+# The build before the provenance fields produced 7ae3ca91...791d6ae for these inputs with
+# the model `small`. Only licensed models run now, so the test installs medium.en; the same
+# inputs with the model renamed back to `small` still digest to that older value.
+_LYRICS_KEY_BEFORE_PROVENANCE = "f244c79cc867c92ae86c0767d85e7e271ad632209f3d3bce099bf8fc79fed2fe"
 
 
 def test_recording_lyric_provenance_moves_no_stage_key(
@@ -2024,7 +2012,7 @@ def test_recording_lyric_provenance_moves_no_stage_key(
     """
     _install_providers(monkeypatch, cues=_TRANSCRIPT_CUES)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url=_URL, lyrics_path=_sheet(tmp_path), rights_confirmed=True)
 
     project_dir, manifest = run_new(options)
@@ -2070,7 +2058,7 @@ def test_renaming_a_project_re_renders_what_carries_the_name(
     """
     _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
     assert manifest["title"] == "Synthetic Song"
 
@@ -2110,7 +2098,7 @@ def test_a_lyrics_file_that_will_not_parse_reports_itself(
     """
     _calls, whisper_models = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     broken = tmp_path / "broken.json"
     broken.write_text('{"schema": "not.a.lyrics.schema", "cues": []}')
     options = PipelineOptions(url=_URL, lyrics_path=broken, rights_confirmed=True)
@@ -2180,7 +2168,7 @@ def test_a_failed_reacquisition_leaves_a_finished_project_exactly_as_it_was(
 
     calls, _providers = _install_providers(monkeypatch)
     _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
-    _cache_whisper_model("small")
+    _cache_whisper_model("medium.en")
     options = PipelineOptions(url="https://youtu.be/abcdef12345", rights_confirmed=True)
     project_dir, _manifest = run_new(options)
 

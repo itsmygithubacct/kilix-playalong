@@ -231,7 +231,7 @@ ProgressCallback = Callable[[str, ProgressStatus, str], None]
 # test_whisper_policy_mirrors_the_transcription_provider fails when the provider reorders
 # its candidates or changes how `auto` picks a device, and someone then chooses whether the
 # stage keys should move with it.
-_WHISPER_QUALITY_ORDER = ("large-v3", "large-v3-turbo", "medium", "small")
+_WHISPER_QUALITY_ORDER = ("large-v3", "medium.en")
 _WHISPER_DEVICE_ORDER = ("cuda", "cpu")
 
 
@@ -342,7 +342,6 @@ class PipelineOptions:
     tuning: tuple[int, ...] = STANDARD_TUNING
     note_confidence: float = NOTE_CONFIDENCE_FLOOR
     max_polyphony: int = DEFAULT_MAX_POLYPHONY
-    allow_model_downloads: bool = False
     rights_confirmed: bool = False
 
     def source_spec(self) -> SourceSpec | None:
@@ -1045,7 +1044,6 @@ class Pipeline:
             self.project_dir / "stems",
             model=self.options.model,
             device=self.options.device,
-            allow_model_downloads=self.options.allow_model_downloads,
         )
         # Every stem is digested twice in the run that makes it: once here for the
         # manifest's track list and once by `finish_stage` for the stage's artifact list.
@@ -1234,12 +1232,7 @@ class Pipeline:
         heavy work -- weights, inference, torch -- still happens only in the worker
         subprocess.
         """
-        model = transcription.resolve_model(
-            self.options.whisper_model,
-            device=self.options.device,
-            model_cache=transcription.model_cache_path(),
-            allow_model_downloads=self.options.allow_model_downloads,
-        )
+        model = transcription.resolve_model(self.options.whisper_model, device=self.options.device)
         return model, self._resolved_whisper_device()
 
     def _lyrics_keys(
@@ -1402,7 +1395,6 @@ class Pipeline:
         the URL arm, where it is part of the acquisition key, and on the file arm it moves
         no stage at all -- see `_acquisition_stage`, which explains why the file arm's copy
         is not re-keyed by a bound that was applied when it was admitted;
-        ``allow_model_downloads`` is already folded into the model `auto` resolves to;
         ``title``, ``artist`` and ``max_fret`` never touch a lyric.
         """
         return {
@@ -1447,7 +1439,6 @@ class Pipeline:
             language=self.options.language,
             model=self.options.whisper_model,
             device=self.options.device,
-            allow_model_downloads=self.options.allow_model_downloads,
             audio_source=self.options.audio_source,
             mix=self._normalized_path(),
         )
@@ -1544,9 +1535,9 @@ class Pipeline:
         `is_available()` is False; it is installed but will not resolve a model to run,
         which raises `ProviderUnavailableError`; or an input sits past a bound, which raises
         `InvalidInputError`. The middle one is not hypothetical -- an installed extra with
-        an empty weights cache and no `--allow-model-downloads` is the state of the machine
-        this was found on, and `is_available()` says True there, which is why guarding on it
-        alone lost the whole lyrics stage for a plain-text sheet.
+        no licensed Whisper model installed (then an empty weights cache) was the state of
+        the machine this was found on, and `is_available()` says True there, which is why
+        guarding on it alone lost the whole lyrics stage for a plain-text sheet.
         `test_alignment_survives_a_provider_that_will_not_run` is that case, and its second
         half is why skipping is not a one-way door on the default options: the skipped run
         keys the stage on the unresolved `auto`/`auto` pair (`_undecidable_whisper_keys`),

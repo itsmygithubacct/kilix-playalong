@@ -86,11 +86,25 @@ provider receives a minimal allowlisted environment and a disposable private
 home directory, so unrelated session credentials and Python import paths do not
 cross the worker boundary.
 
-YouTube access and model downloads remain network operations governed by their
-providers' current terms. Model code licenses do not automatically establish
-the rights of model weights or source media. `--allow-model-downloads` is an
-explicit per-run decision; without it, missing Hugging Face/Demucs weights fail
-offline instead of downloading silently.
+YouTube access remains a network operation governed by its provider's current
+terms. Model code licenses do not establish the rights of model weights, so this
+app never downloads weights itself. Every model it runs is a Kilix Content asset
+with a kilix-license record:
+
+| Stage | Asset | Licence |
+| --- | --- | --- |
+| Stem separation | `demucs-htdemucs-6s` | MIT, Meta Platforms, Inc. and affiliates |
+| Guitar notes | `basic-pitch-icassp-2022-onnx` | Apache-2.0, Spotify AB |
+| English lyrics (default) | `faster-whisper-medium-en` | MIT, OpenAI and SYSTRAN |
+| Lyrics in any language (optional) | `faster-whisper-large-v3` | MIT, OpenAI and SYSTRAN |
+
+`kilix-playalong models install` runs `kilix models install` for each default
+asset (add `--large-v3` for the optional one). Kilix shows the record and the
+licence text, writes the receipt and fetches the pinned files from their source.
+Before each run, the stage verifies its asset with `kilix models verify`, which
+re-checks the receipt and re-hashes the files, and then loads that directory
+offline. A stage whose asset does not verify refuses and names the install
+command. `kilix-playalong models` reports what is installed.
 
 ## Requirements
 
@@ -128,10 +142,10 @@ supported.
 ## Create and play
 
 ```bash
+uv run --frozen kilix-playalong models install
 uv run --frozen kilix-playalong create \
   'https://www.youtube.com/watch?v=VIDEO_ID' \
-  --i-have-rights \
-  --allow-model-downloads
+  --i-have-rights
 
 uv run --frozen kilix-playalong list
 uv run --frozen kilix-playalong serve song-PROJECT_ID
@@ -144,21 +158,19 @@ uv run --frozen kilix-playalong create 'https://youtu.be/VIDEO_ID' \
   --i-have-rights \
   --lyrics song.lrc \
   --tuning drop-d \
-  --max-fret 22 \
-  --allow-model-downloads
+  --max-fret 22
 ```
 
-The default `--whisper-model auto` favors `large-v3` when CUDA or at least
-10 GiB of memory is available, then steps down through `large-v3-turbo`,
-`medium`, and `small` on tighter systems. Without model-download permission it
-uses the strongest compatible model already in the private cache. An explicit
-model name always overrides this selection.
+The default `--whisper-model auto` picks `large-v3` when it is installed and
+CUDA or at least 10 GiB of memory is available, and `medium.en` otherwise.
+`medium.en` transcribes English only; a project that asks for another language
+needs `large-v3`. An explicit model name always overrides this selection.
 
 The create command prints the project id and printable export path. An
 interrupted project resumes from verified artifacts:
 
 ```bash
-uv run --frozen kilix-playalong resume song-PROJECT_ID --allow-model-downloads
+uv run --frozen kilix-playalong resume song-PROJECT_ID
 ```
 
 ## Export a guitar songbook

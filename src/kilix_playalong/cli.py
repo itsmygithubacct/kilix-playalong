@@ -13,7 +13,7 @@ from pathlib import Path
 
 from kilix_state import default_library
 
-from . import __version__
+from . import __version__, licensed
 from .errors import InvalidInputError, PlayalongError, RightsConfirmationRequired
 from .options_registry import TUNINGS, build_options_document, tuning_pitches
 from .optionspec import OptionsDocument
@@ -237,9 +237,7 @@ def _pipeline_options(
         note_confidence=float(
             arguments.note_confidence
             if arguments.note_confidence is not None
-            else _stored_number(
-                settings, "note_confidence", _default(document, "note_confidence")
-            )
+            else _stored_number(settings, "note_confidence", _default(document, "note_confidence"))
         ),
         max_polyphony=int(
             arguments.max_polyphony
@@ -251,7 +249,6 @@ def _pipeline_options(
             if arguments.tuning is not None
             else _stored_tuning(settings, _default(document, "tuning"))
         ),
-        allow_model_downloads=arguments.allow_model_downloads,
         rights_confirmed=manifest is not None or bool(getattr(arguments, "i_have_rights", False)),
     )
 
@@ -281,7 +278,7 @@ def command_resume(arguments: argparse.Namespace) -> int:
 
 def command_options(arguments: argparse.Namespace) -> int:
     """Print the intake contract, which is what both surfaces render and this CLI defaults to."""
-    document = build_options_document(allow_model_downloads=arguments.allow_model_downloads)
+    document = build_options_document()
     print(json.dumps(document.as_json(), indent=2, ensure_ascii=False))
     return 0
 
@@ -369,6 +366,7 @@ def command_doctor(arguments: argparse.Namespace) -> int:
         name: _version(name)
         for name in ("yt-dlp", "mido", "kilix-state-py", "basic-pitch", "demucs", "faster-whisper")
     }
+    models = {model.asset_id: licensed.installed(model) for model in licensed.ALL}
     report = {
         "schema": "kilix.playalong.doctor/v1",
         "version": __version__,
@@ -381,10 +379,16 @@ def command_doctor(arguments: argparse.Namespace) -> int:
             "lyrics_transcription": importlib.util.find_spec("faster_whisper") is not None,
         },
         "kilix_state_library": default_library().path,
+        "models": models,
         "ready": all(tools.values()) and packages["yt-dlp"] is not None,
-        "full_pipeline_ready": all(tools.values())
-        and all(packages[name] is not None for name in ("basic-pitch", "demucs", "faster-whisper")),
     }
+    report["full_pipeline_ready"] = (
+        all(tools.values())
+        and all(packages[name] is not None for name in ("basic-pitch", "demucs", "faster-whisper"))
+        and models[licensed.DEMUCS.asset_id]
+        and models[licensed.BASIC_PITCH.asset_id]
+        and any(models[model.asset_id] for model in licensed.WHISPER.values())
+    )
     if arguments.json:
         print(json.dumps(report, indent=2))
     else:
@@ -393,9 +397,70 @@ def command_doctor(arguments: argparse.Namespace) -> int:
             print(f"  {name:24} {path or 'missing'}")
         for name, version in packages.items():
             print(f"  {name:24} {version or 'not installed'}")
-        pipeline_status = "ready" if report["full_pipeline_ready"] else "needs uv sync --all-extras"
+        for model in licensed.ALL:
+            state = "installed" if models[model.asset_id] else "not installed"
+            print(f"  {model.asset_id:24} {state}")
+        pipeline_status = (
+            "ready"
+            if report["full_pipeline_ready"]
+            else "needs uv sync --all-extras and kilix-playalong models install"
+        )
         print(f"  {'full pipeline':24} {pipeline_status}")
     return 0 if report["ready"] else 1
+
+
+def _model_rows(*, verify: bool) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for model in licensed.ALL:
+        row: dict[str, object] = {
+            "asset": model.asset_id,
+            "label": model.label,
+            "default": model in licensed.DEFAULT_SET,
+            "installed": licensed.installed(model),
+        }
+        if verify:
+            try:
+                licensed.verify(model)
+                row["verified"] = True
+            except PlayalongError as error:
+                row["verified"] = False
+                row["reason"] = str(error)
+        rows.append(row)
+    return rows
+
+
+def command_models(arguments: argparse.Namespace) -> int:
+    """Report, or install through Kilix, the licensed models this app runs."""
+    if arguments.action == "install":
+        wanted = [*licensed.DEFAULT_SET]
+        if arguments.large_v3:
+            wanted.append(licensed.WHISPER_LARGE_V3)
+        failed = []
+        for model in wanted:
+            try:
+                licensed.verify(model)
+                print(f"{model.asset_id}: already installed and verified")
+                continue
+            except PlayalongError:
+                pass
+            print(f"{model.asset_id}: {model.label}", flush=True)
+            if licensed.install(model) != 0:
+                failed.append(model.asset_id)
+        if failed:
+            print(f"kilix-playalong: not installed: {', '.join(failed)}", file=sys.stderr)
+            return 1
+        return 0
+    rows = _model_rows(verify=arguments.verify)
+    if arguments.json:
+        print(json.dumps({"schema": "kilix.playalong.models/v1", "models": rows}, indent=2))
+    else:
+        for row in rows:
+            state = "installed" if row["installed"] else "not installed"
+            if "verified" in row:
+                state = "verified" if row["verified"] else "not verified"
+            marker = "" if row["default"] else "  (optional)"
+            print(f"  {row['asset']:30} {state}{marker}")
+    return 0 if all(row["installed"] for row in rows if row["default"]) else 1
 
 
 def _describe(
@@ -470,7 +535,7 @@ def _common_pipeline_options(
     )
     parser.add_argument(
         "--whisper-model",
-        choices=tuple(sorted(transcription.MODEL_CHOICES)),
+        choices=tuple(sorted(transcription.OFFERED_MODELS)),
         default=default("whisper_model"),
         help=_describe(document, "whisper_model", resuming=resuming),
     )
@@ -529,12 +594,6 @@ def _common_pipeline_options(
             "longest source accepted, in minutes "
             + ("(default: keep what the project recorded)" if resuming else f"(default: {minutes})")
         ),
-    )
-    parser.add_argument(
-        "--allow-model-downloads",
-        action="store_true",
-        default=bool(document.defaults()["allow_model_downloads"]),
-        help="allow missing model weights to be downloaded for this explicit run",
     )
 
 
@@ -596,11 +655,6 @@ def build_parser() -> argparse.ArgumentParser:
         "options",
         help="print every backend option, its default here, and why one is unavailable",
     )
-    options_parser.add_argument(
-        "--allow-model-downloads",
-        action="store_true",
-        help="describe the machine as it would be with downloads permitted",
-    )
     options_parser.set_defaults(function=command_options)
 
     list_parser = commands.add_parser("list", help="list private local projects")
@@ -631,6 +685,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-audio", action="store_true", help="export a chart without audio files"
     )
     songbook.set_defaults(function=command_songbook)
+
+    models = commands.add_parser(
+        "models",
+        help="report or install the licensed model weights, through kilix models install",
+    )
+    models.add_argument("action", nargs="?", choices=("status", "install"), default="status")
+    models.add_argument(
+        "--large-v3",
+        action="store_true",
+        help="also install Whisper large-v3, for lyrics that are not in English",
+    )
+    models.add_argument(
+        "--verify",
+        action="store_true",
+        help="re-check each receipt and re-hash each model (status only)",
+    )
+    models.add_argument("--json", action="store_true")
+    models.set_defaults(function=command_models)
 
     doctor = commands.add_parser("doctor", help="inspect the locked runtime and optional providers")
     doctor.add_argument("--json", action="store_true")

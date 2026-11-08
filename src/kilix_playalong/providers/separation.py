@@ -1,4 +1,10 @@
-"""Demucs provider wrapper with a private cache and validated stem artifacts."""
+"""Demucs provider wrapper with a private cache and validated stem artifacts.
+
+The htdemucs_6s weights come only through Kilix's licence records: each run
+first verifies the ``demucs-htdemucs-6s`` asset, then hands Demucs that
+directory (``--repo``) and the model's signature, and runs it offline. Demucs
+never fetches a model itself.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ import shutil
 import sys
 from pathlib import Path
 
+from .. import licensed
 from ..errors import InvalidInputError, ProviderFailedError, ProviderUnavailableError
 from ..paths import cache_home, ensure_private_directory
 from ..runner import run_command
@@ -14,6 +21,7 @@ from .media import probe
 
 KNOWN_STEMS = ("vocals", "drums", "bass", "guitar", "piano", "other")
 SUPPORTED_MODELS = frozenset({"htdemucs_6s"})
+OFFLINE_PROXY = "http://127.0.0.1:9"
 
 
 def is_available() -> bool:
@@ -26,7 +34,6 @@ def separate(
     *,
     model: str = "htdemucs_6s",
     device: str = "auto",
-    allow_model_downloads: bool = False,
     timeout: float = 90 * 60,
 ) -> dict[str, Path]:
     if model not in SUPPORTED_MODELS:
@@ -35,6 +42,7 @@ def separate(
         raise ProviderUnavailableError(
             "Demucs is not installed; run `uv sync --all-extras` from the repository"
         )
+    weights = licensed.verify(licensed.DEMUCS)
     model_cache = ensure_private_directory(cache_home() / "demucs")
     scratch = destination.parent / ".separate-work"
     if scratch.exists():
@@ -44,8 +52,10 @@ def separate(
         sys.executable,
         "-m",
         "demucs.separate",
+        "--repo",
+        str(weights),
         "--name",
-        model,
+        licensed.DEMUCS_SIGNATURE,
         "--out",
         str(scratch),
         "--filename",
@@ -60,26 +70,23 @@ def separate(
         "TORCH_HOME": str(model_cache / "torch"),
         "HF_HOME": str(model_cache / "huggingface"),
         "HF_HUB_DISABLE_TELEMETRY": "1",
+        "HF_HUB_OFFLINE": "1",
+        # Every route to a model download points at a closed port.
+        "http_proxy": OFFLINE_PROXY,
+        "https_proxy": OFFLINE_PROXY,
+        "HTTP_PROXY": OFFLINE_PROXY,
+        "HTTPS_PROXY": OFFLINE_PROXY,
+        "ALL_PROXY": OFFLINE_PROXY,
+        "NO_PROXY": "",
     }
-    if not allow_model_downloads:
-        environment["HF_HUB_OFFLINE"] = "1"
-        offline_proxy = "http://127.0.0.1:9"
-        environment.update(
-            http_proxy=offline_proxy,
-            https_proxy=offline_proxy,
-            HTTP_PROXY=offline_proxy,
-            HTTPS_PROXY=offline_proxy,
-            ALL_PROXY=offline_proxy,
-            NO_PROXY="",
-        )
     try:
         run_command(
             arguments,
             timeout=timeout,
             env=environment,
-            redact=(str(source), str(destination), str(scratch)),
+            redact=(str(source), str(destination), str(scratch), str(weights)),
         )
-        produced_root = scratch / model.replace("hf://", "").replace("/", "_")
+        produced_root = scratch / licensed.DEMUCS_SIGNATURE
         found = {path.stem: path for path in produced_root.glob("*.wav") if path.is_file()}
         if "vocals" not in found:
             raise ProviderFailedError("Demucs did not produce a vocals stem")

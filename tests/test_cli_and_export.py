@@ -119,7 +119,6 @@ _FLAGS = {
     "max_polyphony": "max_polyphony",
     "title": "title",
     "artist": "artist",
-    "allow_model_downloads": "allow_model_downloads",
     "rights_confirmed": "i_have_rights",
 }
 

@@ -11,19 +11,19 @@ Three rules shape everything below.
 document came from a probe of this machine -- `transcription.is_available()`,
 `separation.is_available()`, `basic_pitch.is_available()`,
 `media.require_media_tools()`, an `importlib` spec lookup, or a real call into
-`transcription.resolve_model`. "faster-whisper is not installed" and "no cached
-weights and downloads are not permitted" are two different sentences here because
-they have two different fixes, and a screen that renders one for the other sends
-the user to the wrong command.
+`transcription.resolve_model`, and `licensed.installed` for the model weights.
+"faster-whisper is not installed" and "no licensed Whisper model is installed"
+are two different sentences here because they have two different fixes, and a
+screen that renders one for the other sends the user to the wrong command.
 
 **Nothing is hidden, and nothing is greyed further than it has to be.** An
 option that cannot run is still described, with the reason attached: a hidden
 option reads as a missing feature. The same argument bounds greying itself. An
 option is greyed only when *nothing* behind it can run here, never merely because
-its most convenient choice cannot -- `auto` scans four of the sixteen
-faster-whisper models, so greying the whole transcription-model control when
-`auto` finds nothing cached would tell a user who has `distil-large-v3` weights on
-disk that a feature they can use today is missing. And when an option *is* greyed,
+its most convenient choice cannot -- on a machine whose memory leaves `auto` only
+medium.en, greying the whole transcription-model control because medium.en is
+missing would tell a user who installed large-v3 that a feature they can use today
+is missing. And when an option *is* greyed,
 every one of its choices is greyed with it (`_greyed_choices`, applied to every
 option in `build_options_document`), because a greyed control cannot offer an
 escape: a reason may only name a way out that is still on the screen.
@@ -32,12 +32,11 @@ escape: a reason may only name a way out that is still on the screen.
 `test_a_blocked_auto_still_offers_the_models_its_reason_points_at` are what make
 that a rule rather than a paragraph.
 
-**Describing is side-effect free.** No directory is created, no subprocess is
-started, nothing is downloaded. The model cache is asked for by
-`transcription.model_cache_path`, which is the provider's non-creating accessor and
-exists for exactly this caller: the path the weights actually land on, named without
-`ensure_private_directory`, because merely opening an intake screen must not write to
-the user's disk.
+**Describing is side-effect free.** No directory is created and nothing is
+downloaded. The one subprocess is `kilix models list`, asked once per process for
+Content's root; it changes nothing. Model weights are then found by a file check
+under that root (`licensed.installed`), because merely opening an intake screen
+must not write to the user's disk or re-hash gigabytes.
 
 The document is also the contract in the other direction: every option id names a
 field of `pipeline.PipelineOptions` (see `BACKEND_FIELDS`), so a surface can post
@@ -80,6 +79,7 @@ import importlib.util
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from . import licensed
 from .errors import InvalidInputError, PlayalongError
 from .lyrics import MAX_LYRICS_BYTES
 from .optionspec import Choice, OptionGroup, OptionsDocument, OptionSpec
@@ -139,7 +139,6 @@ BACKEND_FIELDS: Mapping[str, str] = {
     "note_confidence": "note_confidence",
     "max_polyphony": "max_polyphony",
     "max_duration": "max_duration",
-    "allow_model_downloads": "allow_model_downloads",
     "rights_confirmed": "rights_confirmed",
 }
 
@@ -148,22 +147,17 @@ _WHISPER_MISSING = f"faster-whisper is not installed; {_SYNC} to add the transcr
 _DEMUCS_MISSING = f"Demucs is not installed; {_SYNC}"
 _BASIC_PITCH_MISSING = f"Basic Pitch is not installed; {_SYNC}"
 _YT_DLP_MISSING = f"yt-dlp is not installed; {_SYNC}"
-#: Why `auto` -- and only `auto` -- cannot pick a model. It is attached to the
-#: `auto` choice and never to the option, because the escape it names is one of
-#: the option's other choices: greying the control would forbid the very thing the
-#: sentence asks for. `test_a_blocked_auto_still_offers_the_models_its_reason_points_at`
-#: pins both halves of that -- the clause, and the models being live behind it.
-_NO_CACHED_WEIGHTS = (
-    "'auto' found no cached weights among the models it scans, and model downloads are "
-    "not permitted; turn on 'Allow model downloads', or select a model whose weights "
-    "you already have"
+_INSTALL_MODELS = "run: kilix-playalong models install"
+#: Why `auto` -- and only `auto` -- cannot pick a model while a licensed model is
+#: still installed: this machine's memory leaves `auto` only medium.en, and only
+#: large-v3 is here. It is attached to the `auto` choice and never to the option,
+#: because the escape it names is one of the option's other choices.
+_AUTO_HAS_NO_FIT = (
+    "'auto' found none of the models it may pick on this machine installed; "
+    "select an installed model, or " + _INSTALL_MODELS
 )
-#: The provider names no model under either download answer, so nothing here can
-#: be preselected and nothing can be promised: this one does grey the control.
-_NO_USABLE_MODEL = (
-    "faster-whisper is installed but could not choose a model for this machine; "
-    "`kilix-playalong doctor` reports what it found"
-)
+#: No licensed Whisper model is installed at all: this one greys the control.
+_NO_LICENSED_WHISPER = "no licensed Whisper model is installed; " + _INSTALL_MODELS
 
 #: Mirrors the bounds `pipeline._validate_options` enforces. Drift here would ship
 #: a preselected value the backend rejects, which is the one bug this file exists
@@ -243,26 +237,26 @@ def _reason(*candidates: str | None) -> str | None:
     return "; ".join(present) if present else None
 
 
-def _auto_model(*, allow_model_downloads: bool) -> str | None:
-    """Ask the provider what `auto` means here, or None when nothing is obtainable.
+def _auto_model() -> str | None:
+    """Ask the provider what `auto` means here, or None when it can pick nothing.
 
-    The policy stays where it lives. This calls `resolve_model` twice with the two
-    download answers so the note can say both what runs now and what enabling
-    downloads would change; a failure is a described, greyed-out choice, never a
-    crash in an intake screen.
+    The policy stays where it lives; a failure is a described, greyed-out choice,
+    never a crash in an intake screen.
     """
 
     if not transcription.is_available():
         return None
     try:
-        return transcription.resolve_model(
-            transcription.AUTO_MODEL,
-            device="auto",
-            model_cache=transcription.model_cache_path(),
-            allow_model_downloads=allow_model_downloads,
-        )
+        return transcription.resolve_model(transcription.AUTO_MODEL, device="auto")
     except (PlayalongError, OSError):
         return None
+
+
+def _code_and_weights(code: bool, missing_code: str, model: licensed.LicensedModel) -> str | None:
+    """None when both the provider package and its licensed weights are here."""
+    if not code:
+        return missing_code
+    return licensed.unavailable_reason(model)
 
 
 @dataclass(frozen=True)
@@ -271,8 +265,10 @@ class _Machine:
 
     media_tools_reason: str | None
     yt_dlp: bool
-    demucs: bool
-    guitar: bool
+    #: None when Demucs and its licensed weights are both here, else why not.
+    demucs_reason: str | None
+    #: None when Basic Pitch and its licensed model are both here, else why not.
+    guitar_reason: str | None
     whisper: bool
     #: None when this machine cannot be asked. Enumerating devices is ctranslate2's
     #: job, so without it installed this module does not ask at all rather than
@@ -282,23 +278,22 @@ class _Machine:
     #: is present, but that shortcut only ever produces the negative, so the guard
     #: on `_has_module` is what keeps "not installed" unknown rather than "no GPU".
     cuda: bool | None
-    cached_model: str | None
-    downloadable_model: str | None
-    allow_model_downloads: bool
+    #: What `auto` resolves to here, or None when it can pick nothing.
+    resolved_model: str | None
+    #: Licensed Whisper models whose weights are installed, best first.
+    installed_models: tuple[str, ...]
+
+    @property
+    def demucs(self) -> bool:
+        return self.demucs_reason is None
+
+    @property
+    def guitar(self) -> bool:
+        return self.guitar_reason is None
 
     @property
     def whisper_reason(self) -> str | None:
         """Why the *automatic* model choice cannot pick a model here.
-
-        Three situations, three sentences, because they take three different
-        commands: install the extra, allow the download, or look at a machine
-        that answers neither. Which of the last two applies is decided by whether
-        the provider can name a model when downloads *are* permitted, not by the
-        answer this document was resolved under -- with downloads off and the
-        provider naming nothing either way, "turn on 'Allow model downloads'" is
-        an instruction that would fail too, and `_NO_USABLE_MODEL` is the honest
-        sentence. `test_a_provider_that_answers_nothing_does_not_blame_the_toggle`
-        is that distinction.
 
         This is not the reason the *control* is greyed: see `transcription_reason`.
         """
@@ -307,59 +302,44 @@ class _Machine:
             return _WHISPER_MISSING
         if self.resolved_model is not None:
             return None
-        if self.downloadable_model is None:
-            return _NO_USABLE_MODEL
-        return _NO_CACHED_WEIGHTS
-
-    @property
-    def resolved_model(self) -> str | None:
-        return self.downloadable_model if self.allow_model_downloads else self.cached_model
+        if not self.installed_models:
+            return _NO_LICENSED_WHISPER
+        return _AUTO_HAS_NO_FIT
 
     @property
     def fallback_model(self) -> str | None:
-        """A named model to preselect when `auto` has nothing to load here.
+        """An installed model to preselect when `auto` has nothing to load here."""
 
-        `resolve_model` with downloads permitted answers with the head of the
-        provider's own candidate list, which is the model `auto` becomes the
-        moment the user ticks the box beside this one. Preselecting it is not a
-        claim that it runs: the offline pass scanned that same candidate list
-        moments earlier and found nothing cached, so this is a model whose weights
-        are missing, and `_whisper_default`'s note says exactly that. It is a
-        claim about what to have highlighted while the user decides between
-        allowing a download and naming a model of their own -- nothing more.
-        """
-
-        if not self.whisper or self.resolved_model is not None:
+        if not self.whisper or self.resolved_model is not None or not self.installed_models:
             return None
-        if self.downloadable_model in transcription.SUPPORTED_MODELS:
-            return self.downloadable_model
-        return None
+        return self.installed_models[0]
 
     @property
     def transcription_reason(self) -> str | None:
         """Why *nothing* here can transcribe -- not merely why `auto` cannot.
 
-        This is the reason the control carries, and it is deliberately weaker
-        than `whisper_reason`. They differ in exactly one situation: faster-whisper
-        is installed, downloads are off, nothing `auto` scans is cached, and the
-        provider can still name a model to preselect if downloads were allowed.
-        `auto` scans `transcription.QUALITY_ORDER`, a strict subset of
-        `transcription.SUPPORTED_MODELS`
-        (`test_the_gap_between_auto_and_the_model_list_is_real`), so "nothing
-        `auto` scans is cached" is not "nothing is cached": greying the control on
-        it tells a user with `distil-large-v3` on disk that transcription is
-        unavailable when it is one click away. Over-greying is not the safe
-        direction here -- it reads as a missing feature and it is silent.
+        Weaker than `whisper_reason` in one situation: `auto` can pick nothing on
+        this machine while another licensed model is installed and selectable.
         """
 
         if not self.whisper:
             return _WHISPER_MISSING
-        if self.resolved_model is None and self.fallback_model is None:
-            return self.whisper_reason
+        if not self.installed_models:
+            return _NO_LICENSED_WHISPER
         return None
 
+    def model_reason(self, model: str) -> str | None:
+        """Why one named model cannot be chosen, or None when it can."""
 
-def _probe(*, allow_model_downloads: bool) -> _Machine:
+        if self.transcription_reason is not None:
+            return self.transcription_reason
+        if model in self.installed_models:
+            return None
+        extra = " --large-v3" if model == "large-v3" else ""
+        return f"the Whisper {model} weights are not installed; {_INSTALL_MODELS}{extra}"
+
+
+def _probe() -> _Machine:
     whisper = transcription.is_available()
     cuda: bool | None = None
     if _has_module("ctranslate2"):
@@ -367,13 +347,20 @@ def _probe(*, allow_model_downloads: bool) -> _Machine:
     return _Machine(
         media_tools_reason=_media_tools_reason(),
         yt_dlp=_has_module("yt_dlp"),
-        demucs=separation.is_available(),
-        guitar=basic_pitch.is_available(),
+        demucs_reason=_code_and_weights(
+            separation.is_available(), _DEMUCS_MISSING, licensed.DEMUCS
+        ),
+        guitar_reason=_code_and_weights(
+            basic_pitch.is_available(), _BASIC_PITCH_MISSING, licensed.BASIC_PITCH
+        ),
         whisper=whisper,
         cuda=cuda,
-        cached_model=_auto_model(allow_model_downloads=False),
-        downloadable_model=_auto_model(allow_model_downloads=True),
-        allow_model_downloads=allow_model_downloads,
+        resolved_model=_auto_model(),
+        installed_models=tuple(
+            model for model in transcription.LICENSED_MODELS if transcription.is_installed(model)
+        )
+        if whisper
+        else (),
     )
 
 
@@ -478,7 +465,7 @@ def _source_group(machine: _Machine) -> OptionGroup:
 
 
 def _separation_group(machine: _Machine) -> OptionGroup:
-    demucs_reason = None if machine.demucs else _DEMUCS_MISSING
+    demucs_reason = machine.demucs_reason
     device_reason = (
         None
         if machine.demucs or machine.whisper
@@ -662,21 +649,17 @@ def _whisper_note(machine: _Machine) -> str:
     resolved = machine.resolved_model
     if resolved is None:
         return ""
-    strongest = "the strongest model this machine's memory and device allow"
-    if not machine.allow_model_downloads:
-        note = f"'auto' selects {resolved} here: the strongest model whose weights are cached."
-        if machine.downloadable_model not in (None, resolved):
-            note += f" Allowing model downloads would use {machine.downloadable_model} instead."
-        return note
-    note = f"'auto' selects {resolved} here: {strongest}."
-    if machine.cached_model == resolved:
-        return note + " Its weights are already cached."
-    if machine.cached_model is None:
-        return note + " No weights are cached yet, so the first run downloads them."
-    return (
-        f"{note} Its weights are not cached yet ({machine.cached_model} is), "
-        "so the first run downloads them."
+    note = (
+        f"'auto' selects {resolved} here: the strongest installed licensed model "
+        "this machine's memory and device allow."
     )
+    if resolved.endswith(".en"):
+        note += " It transcribes English only."
+        if "large-v3" not in machine.installed_models:
+            note += (
+                f" For songs in other languages, install large-v3: {_INSTALL_MODELS} --large-v3."
+            )
+    return note
 
 
 def _whisper_default(machine: _Machine) -> tuple[str, str]:
@@ -697,9 +680,8 @@ def _whisper_default(machine: _Machine) -> tuple[str, str]:
     if fallback is None:
         return transcription.AUTO_MODEL, ""
     return fallback, (
-        f"'auto' has nothing to load here, so {fallback} is preselected: it is what 'auto' "
-        "would pick once model downloads are allowed. Its weights are not cached either -- "
-        "allow downloads, or choose a model you already have weights for."
+        f"'auto' has nothing it may pick on this machine, so the installed {fallback} "
+        "is preselected."
     )
 
 
@@ -717,7 +699,8 @@ def _whisper_choice_help(model: str) -> str:
     if model.endswith(".en"):
         notes.append("English only. Do not pick this for any other language.")
     if not notes:
-        notes.append("Larger models hear more and cost more; weights must be cached or downloaded.")
+        notes.append("Every language Whisper knows; the largest model, and the slowest.")
+    notes.append("Installed through its kilix-license record, and run offline.")
     return " ".join(notes)
 
 
@@ -838,7 +821,7 @@ def _lyrics_group(machine: _Machine) -> OptionGroup:
                     Choice(
                         value=transcription.AUTO_MODEL,
                         label="Automatic",
-                        help="Let this machine's memory, device, and cached weights decide.",
+                        help="Let this machine's memory, device, and installed models decide.",
                         available=machine.whisper_reason is None,
                         unavailable_reason=machine.whisper_reason,
                     ),
@@ -847,12 +830,12 @@ def _lyrics_group(machine: _Machine) -> OptionGroup:
                             value=model,
                             label=model,
                             help=_whisper_choice_help(model),
-                            available=machine.transcription_reason is None,
-                            unavailable_reason=machine.transcription_reason,
+                            available=machine.model_reason(model) is None,
+                            unavailable_reason=machine.model_reason(model),
                         )
                         # Sorted, not frozenset order, or the document reorders
                         # itself between processes: `test_the_model_list_is_ordered`.
-                        for model in sorted(transcription.SUPPORTED_MODELS)
+                        for model in sorted(transcription.LICENSED_MODELS)
                     ),
                 ),
                 advanced=True,
@@ -877,7 +860,7 @@ def _lyrics_group(machine: _Machine) -> OptionGroup:
                         unavailable_reason=(
                             None
                             if machine.demucs or value == transcription.AUDIO_SOURCE_MIX
-                            else _DEMUCS_MISSING
+                            else machine.demucs_reason
                         ),
                     )
                     for value in transcription.AUDIO_SOURCE_CHOICES
@@ -915,7 +898,7 @@ def _tuning_choice(name: str) -> Choice:
 
 
 def _tablature_group(machine: _Machine) -> OptionGroup:
-    guitar_reason = None if machine.guitar else _BASIC_PITCH_MISSING
+    guitar_reason = machine.guitar_reason
     return OptionGroup(
         id="tablature",
         label="Guitar tab",
@@ -994,7 +977,7 @@ def _limits_group(machine: _Machine) -> OptionGroup:
     return OptionGroup(
         id="limits",
         label="Limits and consent",
-        help="The ceilings a run may not cross, and the two answers only you can give.",
+        help="The ceilings a run may not cross, and the answer only you can give.",
         options=(
             OptionSpec(
                 id="max_duration",
@@ -1010,18 +993,6 @@ def _limits_group(machine: _Machine) -> OptionGroup:
                 maximum=_MAX_DURATION,
                 unit="seconds",
                 advanced=True,
-            ),
-            OptionSpec(
-                id="allow_model_downloads",
-                label="Allow model downloads",
-                type="bool",
-                default=machine.allow_model_downloads,
-                stage="source",
-                help=(
-                    "Off, model weights that are not already cached are not fetched and the "
-                    "run stays entirely offline. On, this run may download the weights it "
-                    "needs -- which on a fresh machine is what makes it work at all."
-                ),
             ),
             OptionSpec(
                 id="rights_confirmed",
@@ -1067,17 +1038,14 @@ def _greyed_choices(option: OptionSpec) -> OptionSpec:
     )
 
 
-def build_options_document(*, allow_model_downloads: bool = False) -> OptionsDocument:
+def build_options_document() -> OptionsDocument:
     """Describe every backend option as this machine can honour it right now.
 
-    `allow_model_downloads` is the one answer that changes what is available
-    rather than only what is chosen: with downloads forbidden, `auto` may have no
-    obtainable model at all. Passing it re-resolves the document as it will look
-    once the user ticks that box, and the returned document stays self-consistent
-    -- its own `allow_model_downloads` default is the value passed here.
+    No run downloads a model. Which models exist here is what Kilix installed
+    under their licence records, so the document has nothing to re-resolve.
     """
 
-    machine = _probe(allow_model_downloads=allow_model_downloads)
+    machine = _probe()
     groups = (
         _source_group(machine),
         _separation_group(machine),

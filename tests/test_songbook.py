@@ -173,7 +173,7 @@ def test_cli_exports_existing_project_without_running_providers(
     calls, _ = _install_providers(monkeypatch)
     project, _ = run_new(
         PipelineOptions(
-            url="https://youtu.be/abcdef12345", rights_confirmed=True, whisper_model="small"
+            url="https://youtu.be/abcdef12345", rights_confirmed=True, whisper_model="medium.en"
         )
     )
     before = calls.copy()
@@ -210,7 +210,7 @@ def test_audio_export_and_failed_replacement_keep_a_working_book(
     _install_providers(monkeypatch)
     project, _ = run_new(
         PipelineOptions(
-            url="https://youtu.be/abcdef12345", rights_confirmed=True, whisper_model="small"
+            url="https://youtu.be/abcdef12345", rights_confirmed=True, whisper_model="medium.en"
         )
     )
     make_tone(project / "media/normalized.wav", seconds=6)

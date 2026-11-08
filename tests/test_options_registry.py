@@ -33,7 +33,7 @@ from typing import Any
 
 import pytest
 
-from kilix_playalong import alignment, cli, options_registry, pipeline, source
+from kilix_playalong import alignment, cli, licensed, options_registry, pipeline, source
 from kilix_playalong.errors import InvalidInputError, ProviderUnavailableError
 from kilix_playalong.options_registry import (
     BACKEND_FIELDS,
@@ -85,16 +85,17 @@ def _strip_machine(
     guitar: bool = True,
     modules: tuple[str, ...] = ("yt_dlp", "ctranslate2"),
     resolved: str | None = "large-v3",
-    cached: str | None = "large-v3",
+    installed: tuple[str, ...] = ("large-v3", "medium.en"),
+    missing_weights: tuple[str, ...] = (),
     tools: tuple[str, ...] = (),
 ) -> None:
     """Pin every probe the document reads, so the assertions are about one change.
 
-    `resolved` and `cached` are the two answers `resolve_model` gives -- with
-    downloads permitted and without -- and they are separate because the document
-    asks it both ways and the difference between them is a different sentence on
-    the screen. `cached=None` alone is "nothing cached, a download would work";
-    both None is "the provider names nothing at all".
+    `resolved` is what `auto` resolves to (None: it can pick nothing) and
+    `installed` is which licensed Whisper models are present. They are separate
+    because they differ on a machine whose memory leaves `auto` only medium.en
+    while only large-v3 is installed. `missing_weights` names Content assets
+    whose licensed weights are absent although the provider package is installed.
     """
 
     monkeypatch.setattr(transcription, "is_available", lambda: whisper)
@@ -102,16 +103,25 @@ def _strip_machine(
     monkeypatch.setattr(basic_pitch, "is_available", lambda: guitar)
     monkeypatch.setattr(options_registry, "_has_module", lambda name: name in modules)
     monkeypatch.setattr(transcription, "cuda_available", lambda: False)
+    monkeypatch.setattr(transcription, "is_installed", lambda model: model in installed)
 
-    def _resolve(requested: str, *, allow_model_downloads: bool = False, **_: object) -> str:
+    def _resolve(requested: str, **_: object) -> str:
         if requested != transcription.AUTO_MODEL:
             return requested
-        answer = resolved if allow_model_downloads else cached
-        if answer is None:
-            raise ProviderUnavailableError("no suitable cached faster-whisper model is available")
-        return answer
+        if resolved is None:
+            raise ProviderUnavailableError("no licensed Whisper model is installed")
+        return resolved
 
     monkeypatch.setattr(transcription, "resolve_model", _resolve)
+
+    real_reason = licensed.unavailable_reason
+
+    def _weights(model: licensed.LicensedModel) -> str | None:
+        if model.asset_id in missing_weights:
+            return f"the {model.label} is not installed; run: kilix-playalong models install"
+        return real_reason(model)
+
+    monkeypatch.setattr(licensed, "unavailable_reason", _weights)
 
     def _require() -> None:
         if tools:
@@ -148,12 +158,11 @@ def test_every_default_is_a_valid_value_for_its_own_option() -> None:
 def test_an_available_option_never_preselects_an_unavailable_choice() -> None:
     """Being offered a control whose preselected value is greyed out is a dead end."""
 
-    for allow in (False, True):
-        for option in _options(build_options_document(allow_model_downloads=allow)):
-            if not option.available or not option.choices:
-                continue
-            selected = next(c for c in option.choices if c.value == option.default)
-            assert selected.available, f"{option.id} preselects the unavailable {selected.value}"
+    for option in _options(build_options_document()):
+        if not option.available or not option.choices:
+            continue
+        selected = next(c for c in option.choices if c.value == option.default)
+        assert selected.available, f"{option.id} preselects the unavailable {selected.value}"
 
 
 def test_document_defaults_satisfy_the_pipeline_validator() -> None:
@@ -164,7 +173,9 @@ def test_document_defaults_satisfy_the_pipeline_validator() -> None:
     _validate_options(options, require_rights=True)
 
 
-@pytest.mark.parametrize("option_id", ["max_duration", "max_fret", "note_confidence", "max_polyphony"])
+@pytest.mark.parametrize(
+    "option_id", ["max_duration", "max_fret", "note_confidence", "max_polyphony"]
+)
 def test_numeric_bounds_match_the_pipeline_validator(option_id: str) -> None:
     """The advertised range must be the range the backend enforces, at both ends."""
 
@@ -368,8 +379,10 @@ _DEGRADED_MACHINES: tuple[tuple[str, dict[str, Any]], ...] = (
     ("no yt-dlp", {"modules": ("ctranslate2",)}),
     ("no ctranslate2", {"modules": ("yt_dlp",)}),
     ("no ffprobe", {"tools": ("ffprobe",)}),
-    ("nothing cached", {"cached": None}),
-    ("no model under either answer", {"cached": None, "resolved": None}),
+    ("auto has nothing it may pick", {"resolved": None, "installed": ("large-v3",)}),
+    ("no licensed Whisper model", {"resolved": None, "installed": ()}),
+    ("no Demucs weights", {"missing_weights": ("demucs-htdemucs-6s",)}),
+    ("no Basic Pitch model", {"missing_weights": ("basic-pitch-icassp-2022-onnx",)}),
     (
         "a bare machine",
         {
@@ -378,8 +391,8 @@ _DEGRADED_MACHINES: tuple[tuple[str, dict[str, Any]], ...] = (
             "guitar": False,
             "modules": (),
             "tools": ("ffmpeg", "ffprobe"),
-            "cached": None,
             "resolved": None,
+            "installed": (),
         },
     ),
 )
@@ -388,14 +401,12 @@ _DEGRADED_MACHINES: tuple[tuple[str, dict[str, Any]], ...] = (
 def _degraded_documents(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[tuple[str, OptionsDocument]]:
-    """Every machine in the sweep, each described under both download answers."""
+    """Every machine in the sweep, each described once."""
 
     for label, machine in _DEGRADED_MACHINES:
         with monkeypatch.context() as patch:
             _strip_machine(patch, **machine)
-            for allow in (False, True):
-                document = build_options_document(allow_model_downloads=allow)
-                yield f"{label} (downloads={allow})", document
+            yield label, build_options_document()
 
 
 def test_a_greyed_control_never_leaves_a_live_choice_behind(
@@ -462,54 +473,37 @@ def test_a_blocked_auto_still_offers_the_models_its_reason_points_at(
 ) -> None:
     """Over-greying, closed at the one place it happens, with the escape made real.
 
-    `auto` scans four of the sixteen models; "nothing `auto` scans is cached" is
-    therefore not "nothing is cached", and a user holding `distil-large-v3`
-    weights can transcribe today. Greying the whole control tells them the feature
-    is missing. So the option stays available, only `auto` is greyed, and the
-    escape its reason names -- picking a model yourself -- is asserted to be on
-    the screen rather than described as being there.
+    No GPU and too little memory leave `auto` only medium.en; a user who installed
+    only large-v3 can still transcribe by naming it. So the option stays available,
+    only `auto` is greyed, and the escape its reason names is on the screen.
     """
 
-    _strip_machine(monkeypatch, cached=None)
+    _strip_machine(monkeypatch, resolved=None, installed=("large-v3",))
     option = build_options_document().option("whisper_model")
     assert option is not None
     assert option.available, "a named model still runs here; greying the control hides it"
 
     auto = next(c for c in option.choices if c.value == transcription.AUTO_MODEL)
     assert not auto.available and auto.unavailable_reason is not None
-    assert "select a model whose weights you already have" in auto.unavailable_reason
+    assert "select an installed model" in auto.unavailable_reason
 
-    # The escape, as a fact about the document rather than a sentence in it.
     selectable = [c.value for c in option.choices if c.available]
-    assert transcription.AUTO_MODEL not in selectable
-    assert set(selectable) == set(transcription.SUPPORTED_MODELS)
-    assert option.default in selectable, "the escape is offered but nothing is preselected"
-    assert option.default_is_resolved and option.resolved_note
-    # ...and the preselection is not sold as something that will run.
-    assert "not cached" in option.resolved_note
+    assert selectable == ["large-v3"]
+    assert option.default == "large-v3", "the escape is offered but nothing is preselected"
+    assert option.default_is_resolved and "preselected" in option.resolved_note
 
 
 def test_a_blocked_auto_does_not_grey_transcription_as_a_lyric_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same over-greying, one option over, in the one state that can show it.
+    """The one state where `whisper_reason` and `transcription_reason` disagree.
 
-    faster-whisper installed, downloads off, nothing `auto` scans cached, a model
-    still nameable: this is the only machine on which `_Machine.whisper_reason`
-    and `_Machine.transcription_reason` disagree, and the two are asserted to
-    disagree here so the rest of this test cannot pass by both being None. The
-    "Transcribe the singing" arm and the audio-source control read the weaker of
-    the two, because a named model transcribes here and greying them would tell a
-    user holding `distil-large-v3` weights that the feature is gone.
-
-    The suite's other assertion on this choice
-    (`test_what_to_transcribe_dies_with_transcription`) runs on `whisper=False`,
-    where both reasons are the same `_WHISPER_MISSING` string: it cannot see which
-    of them the arm reads. This can.
+    The "Transcribe the singing" arm and the audio-source control read the weaker
+    of the two, because a named model still transcribes here.
     """
 
-    _strip_machine(monkeypatch, cached=None)
-    machine = options_registry._probe(allow_model_downloads=False)
+    _strip_machine(monkeypatch, resolved=None, installed=("large-v3",))
+    machine = options_registry._probe()
     assert machine.whisper_reason is not None, "not the state this test is about"
     assert machine.transcription_reason is None, "not the state this test is about"
 
@@ -522,24 +516,19 @@ def test_a_blocked_auto_does_not_grey_transcription_as_a_lyric_source(
     assert audio is not None and audio.available and audio.unavailable_reason is None
 
 
-def test_the_gap_between_auto_and_the_model_list_is_real() -> None:
-    """The whole case for not greying the control, as a fact about the provider.
+def test_auto_picks_only_from_the_licensed_models() -> None:
+    """Every model `auto` may pick has a kilix-license asset, and the screen offers no other.
 
-    `auto` picks from `QUALITY_ORDER`; the option offers `SUPPORTED_MODELS`. If
-    those two were the same set, "nothing `auto` scans is cached" *would* mean
-    "nothing is cached" and greying the control would be right. They are not, and
-    the docstrings that say so name the counts, so the counts are pinned here: a
-    provider that widens `auto` to the whole list should fail this and take the
-    prose with it.
+    The older names still validate so a stored project resumes, but none of them
+    is offered and none can run.
     """
 
-    assert set(transcription.QUALITY_ORDER) < set(transcription.SUPPORTED_MODELS)
-    assert len(transcription.QUALITY_ORDER) == 4, "update the 'four of the sixteen' prose"
-    assert len(transcription.SUPPORTED_MODELS) == 16, "update the 'four of the sixteen' prose"
-    # The example the module docstring uses, and the reason it is not a corner:
-    # every distilled model is outside what `auto` looks at.
-    assert "distil-large-v3" in transcription.SUPPORTED_MODELS
-    assert "distil-large-v3" not in transcription.QUALITY_ORDER
+    assert set(transcription.QUALITY_ORDER) == set(transcription.LICENSED_MODELS)
+    assert set(transcription.LICENSED_MODELS) == set(licensed.WHISPER)
+    assert set(transcription.LICENSED_MODELS) < set(transcription.SUPPORTED_MODELS)
+    option = build_options_document().option("whisper_model")
+    assert option is not None
+    assert [c.value for c in option.choices] == list(transcription.OFFERED_MODELS)
 
 
 def test_nothing_transcribable_greys_the_model_control_and_all_of_it(
@@ -555,17 +544,34 @@ def test_nothing_transcribable_greys_the_model_control_and_all_of_it(
     assert not option.default_is_resolved and option.resolved_note == ""
 
 
-def test_a_provider_that_answers_nothing_does_not_blame_the_toggle(
+def test_no_licensed_model_greys_the_control_and_names_the_install(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ "Allow downloads" is only the fix when allowing them would actually help."""
-
-    _strip_machine(monkeypatch, cached=None, resolved=None)
+    _strip_machine(monkeypatch, resolved=None, installed=())
     option = build_options_document().option("whisper_model")
     assert option is not None and not option.available
     assert option.unavailable_reason is not None
-    assert "doctor" in option.unavailable_reason
-    assert "Allow model downloads" not in option.unavailable_reason
+    assert "kilix-playalong models install" in option.unavailable_reason
+    assert "download" not in option.unavailable_reason
+
+
+def test_missing_licensed_weights_grey_separation_and_the_tab(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The package being installed is not enough: the licensed weights must be too."""
+
+    _strip_machine(
+        monkeypatch, missing_weights=("demucs-htdemucs-6s", "basic-pitch-icassp-2022-onnx")
+    )
+    document = build_options_document()
+    model = document.option("model")
+    assert model is not None and not model.available
+    assert model.unavailable_reason is not None and "models install" in model.unavailable_reason
+    assert document.defaults()["audio_source"] == transcription.AUDIO_SOURCE_MIX
+    for option in _options(document):
+        if option.stage in ("transcribe-guitar", "tablature"):
+            assert not option.available, option.id
+            assert "models install" in (option.unavailable_reason or ""), option.id
 
 
 def test_what_to_transcribe_dies_with_transcription(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -696,7 +702,6 @@ def test_cli_defaults_agree_with_the_document() -> None:
         "lyrics_path": arguments.lyrics,
         "title": arguments.title,
         "artist": arguments.artist,
-        "allow_model_downloads": arguments.allow_model_downloads,
         "rights_confirmed": arguments.i_have_rights,
     }
     for option_id, cli_value in pairs.items():
@@ -736,6 +741,14 @@ def test_every_option_carries_a_reason_exactly_when_it_is_unavailable() -> None:
             assert choice.available == (choice.unavailable_reason is None), choice.value
 
 
+def test_describing_this_machine_never_verifies_a_model(licensed_store: Any) -> None:
+    """Verifying re-hashes gigabytes; an intake screen only checks that files are there."""
+
+    licensed_store.calls.clear()
+    build_options_document()
+    assert licensed_store.calls and all(call == ("list",) for call in licensed_store.calls)
+
+
 def test_describing_this_machine_writes_nothing(private_homes: Path) -> None:
     """Opening an intake screen must not create directories under the user's home."""
 
@@ -746,7 +759,6 @@ def test_describing_this_machine_writes_nothing(private_homes: Path) -> None:
     # stray `ensure_private_directory` would ride out of here unnoticed.
     assert not transcription.model_cache_path().exists(), "naming the cache made it"
     build_options_document()
-    build_options_document(allow_model_downloads=True)
     assert not cache.exists(), "describing the machine created the model cache"
     assert not private_homes.exists(), "describing the machine created the project store"
 
@@ -757,7 +769,7 @@ def test_describing_this_machine_writes_nothing(private_homes: Path) -> None:
 def test_a_missing_faster_whisper_reads_differently_from_missing_weights(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two failures, two fixes: `uv sync` and the download consent are not the same."""
+    """Two failures, two fixes: `uv sync` and `kilix-playalong models install`."""
 
     _strip_machine(monkeypatch, whisper=False)
     missing_extra = build_options_document().option("whisper_model")
@@ -765,54 +777,26 @@ def test_a_missing_faster_whisper_reads_differently_from_missing_weights(
     assert missing_extra.unavailable_reason is not None
     assert "uv sync" in missing_extra.unavailable_reason
 
-    # Nothing cached, but a download would fetch something. The control stays
-    # live -- see `test_a_blocked_auto_still_offers_the_models_its_reason_points_at`
-    # -- so this sentence belongs to the `auto` choice, not to the option.
-    _strip_machine(monkeypatch, cached=None)
+    _strip_machine(monkeypatch, resolved=None, installed=())
     option = build_options_document().option("whisper_model")
-    assert option is not None and option.available
-    no_weights = next(c for c in option.choices if c.value == transcription.AUTO_MODEL)
-    assert not no_weights.available
-    assert no_weights.unavailable_reason is not None
-    assert "download" in no_weights.unavailable_reason
+    assert option is not None and not option.available
+    no_weights = option.unavailable_reason
+    assert no_weights is not None and "models install" in no_weights
 
-    # Different is not enough: each reason has to name its own fix and only its
-    # own. A sentence carrying both sends a user with the extra installed off to
-    # reinstall it, which is the wrong command dressed as a helpful one.
-    assert "uv sync" not in no_weights.unavailable_reason
-    assert "download" not in missing_extra.unavailable_reason
+    # Each reason names its own fix and only its own.
+    assert "uv sync" not in no_weights
+    assert "models install" not in missing_extra.unavailable_reason
 
 
-def test_permitting_downloads_reresolves_the_model_it_could_not_choose(
+def test_a_model_that_is_not_installed_is_greyed_with_its_install_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The consent toggle changes availability, not only choice -- so it re-resolves."""
-
-    calls: list[bool] = []
-
-    def _resolve(requested: str, *, allow_model_downloads: bool, **_: object) -> str:
-        calls.append(allow_model_downloads)
-        if not allow_model_downloads:
-            raise ProviderUnavailableError("no suitable cached faster-whisper model")
-        return "large-v3"
-
-    _strip_machine(monkeypatch)
-    monkeypatch.setattr(transcription, "resolve_model", _resolve)
-
-    offline = build_options_document().option("whisper_model")
-    assert offline is not None and offline.available
-    offline_auto = next(c for c in offline.choices if c.value == transcription.AUTO_MODEL)
-    assert not offline_auto.available
-
-    online = build_options_document(allow_model_downloads=True)
-    model = online.option("whisper_model")
-    assert model is not None and model.available
-    assert model.default == transcription.AUTO_MODEL
-    assert model.default_is_resolved and "large-v3" in model.resolved_note
-    assert "download" in model.resolved_note
-    assert True in calls and False in calls, "the provider owns the policy; it must be asked"
-    # The document stays self-consistent: it reports the answer it was resolved under.
-    assert online.defaults()["allow_model_downloads"] is True
+    _strip_machine(monkeypatch, resolved="medium.en", installed=("medium.en",))
+    document = build_options_document()
+    large = _choice(document, "whisper_model", "large-v3")
+    assert not large.available
+    assert large.unavailable_reason is not None and "--large-v3" in large.unavailable_reason
+    assert _choice(document, "whisper_model", "medium.en").available
 
 
 def test_an_unobtainable_model_is_a_reason_and_never_a_crash(
@@ -823,22 +807,24 @@ def test_an_unobtainable_model_is_a_reason_and_never_a_crash(
 
     _strip_machine(monkeypatch)
     monkeypatch.setattr(transcription, "resolve_model", _explode)
-    document = build_options_document(allow_model_downloads=True)
-    option = document.option("whisper_model")
-    assert option is not None and not option.available
-    assert option.unavailable_reason is not None and "doctor" in option.unavailable_reason
-    assert not option.default_is_resolved and option.resolved_note == ""
+    option = build_options_document().option("whisper_model")
+    assert option is not None and option.available, "two installed models stay selectable"
+    auto = next(c for c in option.choices if c.value == transcription.AUTO_MODEL)
+    assert not auto.available and auto.unavailable_reason
 
 
 def test_the_resolved_note_says_what_auto_means_here(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _resolve(requested: str, *, allow_model_downloads: bool, **_: object) -> str:
-        return "large-v3" if allow_model_downloads else "small"
-
-    _strip_machine(monkeypatch)
-    monkeypatch.setattr(transcription, "resolve_model", _resolve)
+    _strip_machine(monkeypatch, resolved="medium.en", installed=("medium.en",))
     option = build_options_document().option("whisper_model")
     assert option is not None and option.available and option.default_is_resolved
-    assert "small" in option.resolved_note and "large-v3" in option.resolved_note
+    assert "medium.en" in option.resolved_note
+    assert "English only" in option.resolved_note
+    assert "--large-v3" in option.resolved_note
+
+    _strip_machine(monkeypatch, resolved="large-v3", installed=("large-v3", "medium.en"))
+    option = build_options_document().option("whisper_model")
+    assert option is not None and "large-v3" in option.resolved_note
+    assert "English only" not in option.resolved_note
 
 
 def test_missing_demucs_greys_separation_and_moves_transcription_to_the_mix(
@@ -974,7 +960,7 @@ def test_every_english_only_model_says_so() -> None:
     option = document.option("whisper_model")
     assert option is not None
     english_only = [c for c in option.choices if c.value.endswith(".en")]
-    assert len(english_only) >= 4, "the .en models vanished; this test is measuring nothing"
+    assert english_only, "the .en model vanished; this test is measuring nothing"
     for choice in english_only:
         assert "English only" in choice.help, f"{choice.value} does not say it is English-only"
     for choice in option.choices:
@@ -1038,43 +1024,23 @@ def test_named_tunings_match_the_cli() -> None:
 def test_whisper_cache_matches_the_pipeline(
     private_homes: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The directory this module probes is the one weights actually land in.
+    """The directory `transcribe` hands the worker as `--cache` is `model_cache_path`."""
 
-    There used to be three spellings of the path -- this module's, the pipeline's
-    and `transcribe`'s own -- and two thirds of this test was two literals being
-    compared. `transcription.model_cache_path` is now the only spelling, so what
-    is left to check is the half that was never a mirror: that `transcribe`
-    really hands *that* function's answer to the worker. Were it to stop, this
-    module would probe directory A and write "'auto' selects small here: the
-    strongest model whose weights are cached" while the run read directory B and
-    found nothing -- a probe stating an availability that is not true, which is
-    the failure this file exists to prevent.
+    captured: list[list[str]] = []
 
-    So it is read out of the real call rather than assumed: `resolve_model`, the
-    first thing `transcribe` hands the path to, is replaced with a capture that
-    stops the run there, before any subprocess. What is captured is
-    `transcribe`'s own `model_cache` local -- the single value that becomes both
-    `--cache` and `HF_HOME` -- at the moment it is computed; a later edit that
-    kept the local and passed something else to the worker would be outside this
-    check.
-    """
-
-    captured: list[Path] = []
-
-    def _capture(model: str, **keywords: Any) -> str:
-        captured.append(Path(str(keywords["model_cache"])))
-        raise ProviderUnavailableError("captured: this test wants the path, not a transcript")
+    def _capture(arguments: Sequence[str], **_: object) -> object:
+        captured.append(list(arguments))
+        raise ProviderUnavailableError("captured: this test wants the argv, not a transcript")
 
     monkeypatch.setattr(transcription, "is_available", lambda: True)
-    monkeypatch.setattr(transcription, "resolve_model", _capture)
+    monkeypatch.setattr(transcription, "run_command", _capture)
     stem = tmp_path / "vocals.wav"
     stem.write_bytes(b"\0")
     with pytest.raises(ProviderUnavailableError):
-        transcription.transcribe(stem, tmp_path / "lyrics.json")
+        transcription.transcribe(stem, tmp_path / "lyrics.json", model="medium.en")
 
-    assert captured == [transcription.model_cache_path()], (
-        "the directory the worker is given is not the one this module probes"
-    )
+    argv = captured[0]
+    assert argv[argv.index("--cache") + 1] == str(transcription.model_cache_path())
 
 
 def test_the_cuda_probe_this_module_reads_still_exists() -> None:

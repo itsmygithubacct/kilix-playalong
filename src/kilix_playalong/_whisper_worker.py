@@ -705,6 +705,9 @@ def _parse_arguments(argv: Sequence[str] | None) -> argparse.Namespace:
         "--audio-source", default=DEFAULT_AUDIO_SOURCE, choices=AUDIO_SOURCE_CHOICES
     )
     parser.add_argument("--mix", type=Path)
+    # The licensed asset directory the provider verified. ``--model`` stays the
+    # name the receipt records; this is what is actually loaded.
+    parser.add_argument("--model-path", type=Path)
     arguments = parser.parse_args(argv)
     if arguments.audio_source != AUDIO_SOURCE_VOCALS and arguments.mix is None:
         parser.error(f"--audio-source {arguments.audio_source} requires --mix")
@@ -723,10 +726,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     compute_type = "int8" if arguments.device == "cpu" else "default"
     model = faster_whisper.WhisperModel(
-        arguments.model,
+        str(arguments.model_path) if arguments.model_path is not None else arguments.model,
         device=arguments.device,
         compute_type=compute_type,
         download_root=str(arguments.cache),
+        # Never a download, whichever argument named the model.
+        local_files_only=True,
     )
     supported = tuple(str(item) for item in model.supported_languages)
     multilingual = len(supported) > 1

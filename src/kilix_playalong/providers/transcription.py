@@ -30,6 +30,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from .. import licensed
 from ..errors import InvalidInputError, ProviderUnavailableError
 from ..paths import cache_home, ensure_private_directory
 from ..runner import run_command, usable_seconds
@@ -56,7 +57,15 @@ SUPPORTED_MODELS = frozenset(
 )
 AUTO_MODEL = "auto"
 DEFAULT_MODEL = AUTO_MODEL
+#: Names a stored project may carry. Older releases ran any of these; they
+#: still validate, so a project that names one resumes, but only the models in
+#: ``LICENSED_MODELS`` can run, because only they have kilix-license records.
 MODEL_CHOICES = SUPPORTED_MODELS | {AUTO_MODEL}
+#: The models a run can load: each is a Kilix Content asset with a licence
+#: record. ``medium.en`` is English-only; ``large-v3`` handles any language.
+LICENSED_MODELS = tuple(licensed.WHISPER)
+#: What a surface offers.
+OFFERED_MODELS = (AUTO_MODEL, *LICENSED_MODELS)
 
 #: Which audio a transcription pass listens to.
 #:
@@ -137,6 +146,7 @@ def normalize_language(value: str) -> str:
 
 
 WHISPER_SOURCE_PREFIX = "faster-whisper:"
+_OFFLINE_PROXY = "http://127.0.0.1:9"
 
 #: Receipt field order. Fixed so the string is stable, greppable and diffable
 #: across runs; ``parse_receipt`` does not depend on the order, but a manifest
@@ -279,26 +289,16 @@ _GIB = 1024**3
 #: silently re-key every project on a user's machine. Its
 #: ``_WHISPER_QUALITY_ORDER`` and the check that compares the two are what turn
 #: that into a decision someone makes.
-QUALITY_ORDER = ("large-v3", "large-v3-turbo", "medium", "small")
-_MODEL_REPOSITORIES = {
-    "large-v3": "Systran/faster-whisper-large-v3",
-    "large-v3-turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
-    "medium": "Systran/faster-whisper-medium",
-    "small": "Systran/faster-whisper-small",
-}
+QUALITY_ORDER = ("large-v3", "medium.en")
 
 
 def model_cache_path() -> Path:
-    """Where this provider keeps faster-whisper's weights, *without* creating it.
+    """faster-whisper's private cache directory, *without* creating it.
 
-    The only supported spelling of that path, and public because more than one
-    caller needs it: ``transcribe`` wraps this in ``ensure_private_directory``
-    and hands the result to the worker as both ``--cache`` and ``HF_HOME``, so
-    this is where the weights actually land. A caller that only wants to
-    *describe* a machine -- which model is already cached, what ``auto`` would
-    run here -- needs the same answer to the same question and must not create a
-    directory to get it, which is exactly why the creation lives in
-    ``transcribe`` and not in here.
+    The weights themselves are never here any more: the worker loads the
+    licensed asset directory ``licensed.verify`` returns, offline. The cache is
+    still the worker's ``HF_HOME``, so nothing it touches lands in the user's.
+    ``transcribe`` creates it; describing a machine must not.
     """
     return cache_home() / "faster-whisper"
 
@@ -447,53 +447,49 @@ def _available_memory_bytes() -> int | None:
 
 
 def _auto_candidates(device: str) -> tuple[str, ...]:
+    """Best-first models ``auto`` may pick on this device.
+
+    large-v3 only where a GPU, or 10 GiB of free memory, can carry it. medium.en
+    is always a candidate: it is the model installed by default, and a weaker
+    transcript beats none.
+    """
     if device == "cuda" or (device == "auto" and cuda_available()):
         return QUALITY_ORDER
-
     available = _available_memory_bytes()
-    if available is None:
-        return QUALITY_ORDER[1:]
-    if available >= 10 * _GIB:
+    if available is not None and available >= 10 * _GIB:
         return QUALITY_ORDER
-    if available >= 6 * _GIB:
-        return QUALITY_ORDER[1:]
-    if available >= 3 * _GIB:
-        return QUALITY_ORDER[2:]
-    return QUALITY_ORDER[3:]
+    return QUALITY_ORDER[1:]
 
 
-def _is_cached(model_cache: Path, model: str) -> bool:
-    repository = _MODEL_REPOSITORIES[model]
-    snapshots = model_cache / ("models--" + repository.replace("/", "--")) / "snapshots"
-    try:
-        return any((snapshot / "model.bin").is_file() for snapshot in snapshots.iterdir())
-    except OSError:
-        return False
+def is_installed(model: str) -> bool:
+    """Whether the licensed asset for ``model`` is present. A hint, not a check."""
+    asset = licensed.WHISPER.get(model)
+    return asset is not None and licensed.installed(asset)
 
 
-def resolve_model(
-    requested: str,
-    *,
-    device: str,
-    model_cache: Path,
-    allow_model_downloads: bool,
-) -> str:
-    """Resolve the adaptive model to the best practical local configuration."""
+_NO_LICENSED_MODEL = "no licensed Whisper model is installed; run: kilix-playalong models install"
+
+
+def resolve_model(requested: str, *, device: str) -> str:
+    """Resolve ``auto`` to the best licensed model installed here.
+
+    An explicit licensed name is returned as asked; whether it is installed is
+    checked when the stage runs. A name with no licence record -- one an older
+    release could run -- is refused with the choices that remain.
+    """
     if requested not in MODEL_CHOICES:
         raise InvalidInputError("unsupported faster-whisper model")
     if requested != AUTO_MODEL:
+        if requested not in licensed.WHISPER:
+            raise ProviderUnavailableError(
+                f"faster-whisper {requested} has no licence record here; "
+                f"choose {', '.join(OFFERED_MODELS)}"
+            )
         return requested
-
-    candidates = _auto_candidates(device)
-    if allow_model_downloads:
-        return candidates[0]
-    for candidate in candidates:
-        if _is_cached(model_cache, candidate):
+    for candidate in _auto_candidates(device):
+        if is_installed(candidate):
             return candidate
-    raise ProviderUnavailableError(
-        "no suitable cached faster-whisper model is available; "
-        "rerun with --allow-model-downloads or select a cached model explicitly"
-    )
+    raise ProviderUnavailableError(_NO_LICENSED_MODEL)
 
 
 def _existing_audio(path: Path, *, label: str) -> Path:
@@ -521,7 +517,6 @@ def transcribe(
     language: str = AUTO_LANGUAGE,
     model: str = DEFAULT_MODEL,
     device: str = "auto",
-    allow_model_downloads: bool = False,
     timeout: float = 60 * 60,
     audio_source: str = DEFAULT_AUDIO_SOURCE,
     mix: Path | None = None,
@@ -568,13 +563,14 @@ def transcribe(
         full_mix = _existing_audio(mix, label="full mix")
     resolved_output = Path(output).resolve()
 
+    selected_model = resolve_model(model, device=device)
+    if selected_model.endswith(".en") and requested_language not in (AUTO_LANGUAGE, "en"):
+        raise ProviderUnavailableError(
+            f"faster-whisper {selected_model} transcribes English only; for "
+            f"'{requested_language}' install large-v3: kilix-playalong models install --large-v3"
+        )
+    model_directory = licensed.verify(licensed.WHISPER[selected_model])
     model_cache = ensure_private_directory(model_cache_path())
-    selected_model = resolve_model(
-        model,
-        device=device,
-        model_cache=model_cache,
-        allow_model_downloads=allow_model_downloads,
-    )
     arguments = [
         sys.executable,
         "-m",
@@ -589,6 +585,8 @@ def transcribe(
         str(model_cache),
         "--audio-source",
         audio_source,
+        "--model-path",
+        str(model_directory),
     ]
     if full_mix is not None:
         arguments.extend(("--mix", str(full_mix)))
@@ -598,18 +596,15 @@ def transcribe(
         "HF_HUB_DISABLE_TELEMETRY": "1",
         "HF_HOME": str(model_cache),
         "PYTHONPATH": str(Path(__file__).resolve().parents[2]),
+        # Always offline: the worker loads the verified directory and nothing else.
+        "HF_HUB_OFFLINE": "1",
+        "http_proxy": _OFFLINE_PROXY,
+        "https_proxy": _OFFLINE_PROXY,
+        "HTTP_PROXY": _OFFLINE_PROXY,
+        "HTTPS_PROXY": _OFFLINE_PROXY,
+        "ALL_PROXY": _OFFLINE_PROXY,
+        "NO_PROXY": "",
     }
-    if not allow_model_downloads:
-        environment["HF_HUB_OFFLINE"] = "1"
-        offline_proxy = "http://127.0.0.1:9"
-        environment.update(
-            http_proxy=offline_proxy,
-            https_proxy=offline_proxy,
-            HTTP_PROXY=offline_proxy,
-            HTTPS_PROXY=offline_proxy,
-            ALL_PROXY=offline_proxy,
-            NO_PROXY="",
-        )
     run_command(
         arguments,
         timeout=seconds * passes,
@@ -622,6 +617,7 @@ def transcribe(
             str(resolved_output),
             str(output),
             str(model_cache),
+            str(model_directory),
         ),
     )
     output.chmod(0o600)
