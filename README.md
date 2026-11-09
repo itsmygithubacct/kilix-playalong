@@ -6,6 +6,11 @@ the isolated guitar stem, a timed guitar tab, and a self-contained printable
 song sheet. Processing stays on the local machine after the explicitly
 requested download.
 
+Installable on demand from the Kilix content catalog as `playalong`
+(`kilix install playalong`). `kilix playalong [ARGS]` installs the pinned
+build on first use and runs the command in the current pane; the catalog
+builds it with `make setup` and runs `.venv/bin/kilix-playalong`.
+
 The generated tab and lyrics timing are drafts. Source separation and automatic
 music transcription are imperfect, especially for dense mixes, doubled guitars,
 unusual tunings, bends, slides, and fast polyphony. Verify the result by ear.
@@ -14,117 +19,48 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for stage contracts, cache
 invalidation, fingering inference, player synchronization, and security
 boundaries.
 
-## What it provides
+## What it does
 
-- YouTube intake through a locked `yt-dlp`. Non-HTTPS or non-YouTube hosts, URLs
-  carrying credentials or a non-standard port, and playlist URLs are rejected
-  before any network call at all; the path is percent-decoded, lowercased and
-  re-split before that compare, so `//playlist` and `/%70laylist` are caught
-  there too, not only a plain `/playlist` or a `/watch?list=` with no `v=`.
-  Live and upcoming streams, a source with no finite positive duration, songs
-  longer than 30 minutes, and a playlist that reached the extractor by a
-  spelling the pre-network gate does not model are rejected from the metadata
-  document, before any media is fetched. A `watch?v=ID&list=LIST` URL is
-  narrowed to the single requested video by `--no-playlist`, never expanded.
-- Downloads carry a 512 MiB `--max-filesize` ceiling, and the finished file is
-  re-checked against that same limit on disk. yt-dlp can refuse a transfer up
-  front only where the server declares the size; a segmented download is bounded
-  while it runs by the 30-minute duration gate and the `bestaudio/best` format
-  choice rather than by any byte counter, so an oversized segmented source is
-  rejected only once its bytes have been written.
-- Six-stem Demucs separation (`vocals`, `drums`, `bass`, `guitar`, `piano`, and
-  `other`) with a common playback clock plus mute and level controls for every
-  stem.
-- Timed YouTube captions when available, user-supplied LRC/SRT/VTT/plain text,
-  or local faster-whisper transcription of the isolated vocal stem.
-- Basic Pitch ONNX transcription of the isolated guitar stem to MIDI, followed
-  by deterministic string/fret inference for standard, Drop D, or DADGAD tuning.
-- A local play-along page with synchronized lyrics and tab highlighting,
-  selectable lyrics, tempo control, seeking, keyboard control, and a vocals-off
-  practice preset.
-- Printable HTML and ASCII tab exports. Printed lyrics and tab can each be
-  hidden independently.
-- A portable songbook with lyrics beside the tab, note names, detected chord
-  labels, editable verse/chorus markers, section loops, and full-song/guitar audio.
-- Resumable, checksummed stages and private XDG storage backed by the shared
-  `kilix-state` library.
+- Takes a YouTube link or a local audio or video file, after an explicit
+  `--i-have-rights` confirmation.
+- Separates six stems with Demucs, times lyrics from captions, supplied text
+  or faster-whisper, and transcribes the guitar stem to MIDI with Basic Pitch.
+- Infers string and fret positions for standard, Drop D or DADGAD tuning and
+  writes a timed tab.
+- Plays the stems together in a loopback web player with synchronized lyrics
+  and tab, mute and level per stem, tempo control and a vocals-off preset.
+- Exports printable HTML and ASCII tab, and an offline songbook folder.
+- Resumes interrupted projects from checksummed stage artifacts.
 
-## Rights and privacy
+The full list, including the intake and download limits, is in
+[docs/features.md](docs/features.md).
 
-Only process media and lyrics you are authorized to use. The command requires an
-explicit `--i-have-rights` confirmation and records that decision; it cannot
-determine ownership for you. Downloaded media, separated stems, lyrics, MIDI,
-tabs, and exports are derivative/private user content. They are never committed,
-uploaded, or used as telemetry by this application.
+## Models
 
-The player binds to `127.0.0.1` only, uses a random per-launch capability in its
-URL, validates the HTTP Host header, exposes a read-only route set, and sends a
-restrictive Content Security Policy. That capability is the only authenticator,
-and it is not a secret the command can keep to itself:
-
-- `serve` always prints the full URL, capability included, on stdout. Anything
-  that records the terminal (a logging wrapper, `script`, a scrollback file, a
-  pasted transcript) records the capability with it. `--no-open` does not
-  change this.
-- Without `--no-open`, `serve` also hands the URL to the browser as a
-  command-line argument. `/proc` is world-readable on a normal Linux system, so
-  any local user can read it out of the browser process's `cmdline` while that
-  process lives.
-- Once the URL reaches a browser it outlives this process: browser history and
-  session-restore data keep it on disk after `serve` exits. The capability stops
-  working then, because each launch mints a new one, but the recorded URL does
-  not disappear with it.
-
-On a shared machine run `serve --no-open`, paste the printed URL yourself, and
-treat terminal logs and browser history as places the capability now lives. The
-`--no-open` behaviour is documented but unasserted: no test drives `serve`'s
-browser launch, so that mitigation is protected by review only.
-
-URLs and local paths are redacted from provider errors. No cookies, browser
-profiles, credentials, or DRM-bypass options are passed to `yt-dlp`. Every
-provider receives a minimal allowlisted environment and a disposable private
-home directory, so unrelated session credentials and Python import paths do not
-cross the worker boundary.
-
-YouTube access remains a network operation governed by its provider's current
-terms. Model code licenses do not establish the rights of model weights, so this
-app never downloads weights itself. Every model it runs is a Kilix Content asset
-with a kilix-license record:
+This repository never downloads model weights. Every model it runs is a Kilix
+Content asset with a kilix-license record:
 
 | Stage | Asset | Licence |
 | --- | --- | --- |
-| Stem separation | `demucs-htdemucs-6s` | MIT, Meta Platforms, Inc. and affiliates |
-| Guitar notes | `basic-pitch-icassp-2022-onnx` | Apache-2.0, Spotify AB |
-| English lyrics (default) | `faster-whisper-medium-en` | MIT, OpenAI and SYSTRAN |
-| Lyrics in any language (optional) | `faster-whisper-large-v3` | MIT, OpenAI and SYSTRAN |
+| Stem separation | `demucs-htdemucs-6s` | MIT |
+| Guitar notes | `basic-pitch-icassp-2022-onnx` | Apache-2.0 |
+| English lyrics (default) | `faster-whisper-medium-en` | MIT |
+| Lyrics in any language (optional) | `faster-whisper-large-v3` | MIT |
 
-`kilix-playalong models install` runs `kilix models install` for each default
-asset (add `--large-v3` for the optional one). Kilix shows the record and the
-licence text, writes the receipt and fetches the pinned files from their source.
-Before each run, the stage verifies its asset with `kilix models verify`, which
-re-checks the receipt and re-hashes the files, and then loads that directory
-offline. A stage whose asset does not verify refuses and names the install
-command. `kilix-playalong models` reports what is installed.
+Copyright holders are listed in
+[docs/rights-and-privacy.md](docs/rights-and-privacy.md).
+`kilix-playalong models install` runs `kilix models install` for each of the
+first three (`--large-v3` adds the fourth); Kilix shows the licence, writes the
+receipt and fetches the pinned files. Before a stage runs, it checks its asset
+with `kilix models verify` and refuses with the install command if the check
+fails. `kilix-playalong models` reports what is installed. Rights, privacy and
+the player's loopback capability are described in
+[docs/rights-and-privacy.md](docs/rights-and-privacy.md).
 
-## Requirements
+## Quick start
 
-- Linux or another POSIX platform
-- `uv` 0.12.x
-- FFmpeg and ffprobe
-- Git submodules
-- Enough free storage for the source, normalized PCM, and six lossless stems
-- For the complete pipeline, a supported CPU or CUDA GPU and several gigabytes
-  for PyTorch, model runtimes, and weights
-- For the ML providers, network access to `github.com`: `demucs` is pinned to a
-  source commit of `adefossez/demucs` rather than to a PyPI release, so
-  `make setup-all` builds it from that repository, the pinned commit hash is
-  its only integrity anchor, and installation fails if the repository or that
-  commit becomes unreachable
-
-The project pins Python 3.10 in `.python-version`. `uv` obtains that interpreter
-when it is not already installed.
-
-## Setup
+Requires `uv` 0.12.x, FFmpeg and ffprobe, and the Git submodules; `uv` fetches
+the pinned Python 3.10. See [docs/setup-and-development.md](docs/setup-and-development.md).
 
 ```bash
 git clone --recurse-submodules https://github.com/itsmygithubacct/kilix-playalong.git
@@ -132,96 +68,32 @@ cd kilix-playalong
 make setup-all
 make check
 uv run --frozen kilix-playalong doctor
-```
-
-`make setup` installs only the small command, test, and state-storage runtime.
-`make setup-all` additionally installs the locked Demucs, Basic Pitch ONNX, and
-faster-whisper providers. Both use the committed `uv.lock`; no `pip` workflow is
-supported.
-
-## Create and play
-
-```bash
 uv run --frozen kilix-playalong models install
 uv run --frozen kilix-playalong create \
   'https://www.youtube.com/watch?v=VIDEO_ID' \
   --i-have-rights
-
-uv run --frozen kilix-playalong list
 uv run --frozen kilix-playalong serve song-PROJECT_ID
 ```
 
-Supply known lyrics or choose another tuning when appropriate:
+`make setup` installs only the command, test and state-storage runtime;
+`make setup-all` adds the Demucs, Basic Pitch ONNX and faster-whisper
+providers.
 
-```bash
-uv run --frozen kilix-playalong create 'https://youtu.be/VIDEO_ID' \
-  --i-have-rights \
-  --lyrics song.lrc \
-  --tuning drop-d \
-  --max-fret 22
-```
+## Usage
 
-The default `--whisper-model auto` picks `large-v3` when it is installed and
-CUDA or at least 10 GiB of memory is available, and `medium.en` otherwise.
-`medium.en` transcribes English only; a project that asks for another language
-needs `large-v3`. An explicit model name always overrides this selection.
+| Command | What it does |
+| --- | --- |
+| `create SOURCE --i-have-rights` | build a project from a link, or `--file PATH` |
+| `resume PROJECT` | continue an interrupted project from verified artifacts |
+| `list`, `show PROJECT` | list projects; show stage and artifact status |
+| `serve PROJECT [--no-open]` | open the timed multitrack player on `127.0.0.1` |
+| `songbook PROJECT [--output DIR]` | export an offline lyrics, notes and tab page |
+| `models [status\|install]` | report or install the licensed models |
+| `options` | print every backend option, its default and availability |
+| `doctor` | inspect the locked runtime and optional providers |
 
-The create command prints the project id and printable export path. An
-interrupted project resumes from verified artifacts:
-
-```bash
-uv run --frozen kilix-playalong resume song-PROJECT_ID
-```
-
-## Export a guitar songbook
-
-```bash
-uv run --frozen kilix-playalong songbook song-PROJECT_ID --output ./my-songbook
-```
-
-Open `my-songbook/index.html` in a browser. Keep its MP3 files beside it when
-copying the folder to another computer. This command uses existing project
-artifacts and FFmpeg; it does not download media or run the ML models again.
-Use `--no-audio` for a smaller chart suitable for printing.
-
-Lyrics appear beside the corresponding tab phrases, with note names under each
-fret. Use **Edit section markers** to add verses, choruses, bridges, and outros,
-set their start times, or remove markers. New projects begin with one **Song**
-section; section boundaries are not automatically classified. Click a fret or
-phrase to play that moment, switch between the full song and isolated guitar,
-slow playback, or loop a section. Each phrase has its own **Loop** button for
-repeating a single line. The player's loop button stops either kind of loop;
-seeking outside its range clears it. Section edits keep an active section loop
-inside its updated boundaries. **Print / Save PDF** prints the chart.
-
-The lyric Edit buttons and section editor save corrections in browser storage
-when available. Download corrections to back them up or transfer them. Corrections
-are tied to the transcript and initial arrangement: a regenerated transcript
-cannot silently apply an older line's edit to a different line. These browser
-edits do not change the project's source files. Storage behavior for `file:`
-pages varies by browser, so keep an exported corrections file.
-
-To start with corrected lyrics and known section markers:
-
-```bash
-uv run --frozen kilix-playalong songbook song-PROJECT_ID \
-  --lyrics corrected.lrc --arrangement sections.json --output ./my-songbook
-```
-
-`sections.json` contains increasing starts in seconds; the first must be zero:
-
-```json
-{"sections":[
-  {"id":"intro","label":"Intro","kind":"intro","start":0},
-  {"id":"verse-1","label":"Verse 1","kind":"verse","start":12},
-  {"id":"chorus-1","label":"Chorus 1","kind":"chorus","start":40}
-]}
-```
-
-The exporter validates times, tuning, and fret/pitch consistency before replacing
-an existing page. Audio conversions finish before the new page is published.
-Old audio files may remain after exporting changed recordings; remove them only
-after confirming no retained page uses them.
+Common `create` options include `--lyrics FILE`, `--tuning`, `--max-fret`
+and `--whisper-model`. Worked examples are in [docs/usage.md](docs/usage.md).
 
 ## Keyboard controls for the multitrack player
 
@@ -232,54 +104,67 @@ after confirming no retained page uses them.
 | `V` | Toggle vocals |
 | `L` | Show or hide lyrics |
 
-## Storage and recovery
 
-Projects live below `${XDG_DATA_HOME:-$HOME/.local/share}/kilix-playalong/projects`.
-Model caches use `${XDG_CACHE_HOME:-$HOME/.cache}/kilix-playalong`. Directories
-are private to the current user. Each stage records its provider, timestamps,
-artifact sizes, and SHA-256 digests. Resume skips only artifacts that still
-match; a changed artifact invalidates every downstream stage.
+## How it works
 
-The project manifest uses `kilix.playalong.project/v1`. Timed lyrics and tab use
-`kilix.playalong.lyrics/v1` and `kilix.playalong.tab/v1`. Uninstalling the code
-does not delete projects or exports.
+```
+link or file --> download (yt-dlp) --> normalize (FFmpeg) --> separate (Demucs)
+                                                                  |
+        songbook / HTML / ASCII <-- tab <-- guitar MIDI (Basic Pitch)
+                                     ^
+                     lyrics (captions, text, faster-whisper)
 
-## Development
-
-```bash
-make setup
-make check
-make smoke-ml
-uv run --frozen pytest
-uv run --frozen ruff check src tests
-uv run --frozen ruff format --check src tests
-uv run --frozen mypy
+project.state: provider, settings fingerprint and SHA-256 for every stage
 ```
 
-Optional songbook browser checks use Node, an installed Playwright package, and
-Chromium. They generate original short tones and lyrics in a temporary folder:
+Each stage writes its artifacts into a private project directory and records
+its provider, settings fingerprint, sizes and SHA-256 digests; resume reuses a
+stage only when everything it depends on still matches. Providers run as
+argument vectors in child processes with timeouts, a minimal environment and a
+disposable home. The player is a read-only server on `127.0.0.1` with a random
+per-launch capability in its URL; the browser never starts jobs. A separate
+C11 practice surface under `src/native` reads the same projects without
+changing them. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-```bash
-PLAYWRIGHT_MODULE=/absolute/path/to/playwright-core/index.mjs \
-CHROMIUM_PATH=/usr/bin/chromium node tests/songbook_browser.mjs
-```
+## Documentation
 
-With `playwright` and its browser installed on Node's normal module path, both
-environment variables can be omitted. This checks audio switching during loading,
-sustained-note highlighting, phrase/section loops, large correction round trips, mobile
-layout, and printing. The Python gate does not install or run browser tooling.
+- [docs/features.md](docs/features.md): the full feature list and intake limits.
+- [docs/rights-and-privacy.md](docs/rights-and-privacy.md): rights, the player
+  capability, provider isolation and the model table.
+- [docs/usage.md](docs/usage.md): create, resume, serve, songbook export,
+  player keys, storage and recovery.
+- [docs/setup-and-development.md](docs/setup-and-development.md): requirements,
+  setup and the development gates.
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): stage contracts, caching,
+  fingering inference, player clock and security boundaries.
+- [docs/FRETBOARD.md](docs/FRETBOARD.md): the fretboard contract shared by
+  the native and browser surfaces.
+- [src/native/README.md](src/native/README.md): the native C11 surface.
 
-`make check` runs `uv lock --check` first and lets nothing else start until it
-passes, so a `pyproject.toml` edit that was never re-locked fails the gate
-instead of silently resolving against a stale `uv.lock`. That ordering is a
-recipe rather than a prerequisite list, because prerequisites are unordered
-under `make -j`, and `tests/test_build_gate.py` asserts it by running this
-Makefile under `-j8`. Every `uv run` in this README passes `--frozen`, so no
-documented command rewrites the committed lock; run `uv lock` deliberately when
-a dependency really changes. `uv lock --check` only proves the lock still
-satisfies `pyproject.toml`, not that it is the resolution uv would produce
-today.
+## Related repositories
 
-Tests use generated metadata, MIDI, lyrics, and tiny original waveforms only.
-No downloaded song, lyric corpus, stem, model weight, or credential belongs in
-this repository.
+- [kilix-state](https://github.com/itsmygithubacct/kilix-state#readme),
+  [soft-raster](https://github.com/itsmygithubacct/soft-raster#readme) and
+  [kitty-terminal-session](https://github.com/itsmygithubacct/kitty-terminal-session#readme):
+  submodules under `third_party/`.
+- [kilix-content](https://github.com/itsmygithubacct/kilix-content#readme) and
+  [kilix-license](https://github.com/itsmygithubacct/kilix-license#readme):
+  the catalog entry, the model assets and their receipts.
+- [kilix](https://github.com/itsmygithubacct/kilix#readme): the
+  `kilix playalong` and `kilix models` verbs.
+
+## Part of Plebian-OS
+
+Kilix Playalong is one of the repositories behind
+[Plebian-OS](https://github.com/itsmygithubacct/plebian-os#readme), a Debian
+install whose desktop is [Kilix](https://github.com/itsmygithubacct/kilix#readme)
+running the [Kilix 95](https://github.com/itsmygithubacct/kilix-95#readme)
+desktop through [Pleb](https://github.com/itsmygithubacct/pleb#readme).
+It is installed on demand from the Kilix content catalog, not shipped in the
+installer image. The map of every repository and how it ships is on the
+[components page](https://github.com/itsmygithubacct/plebian-os/blob/main/docs/components.md).
+
+## License
+
+MIT; see [LICENSE](LICENSE). Model weights are not part of this repository and
+keep their own licences.
