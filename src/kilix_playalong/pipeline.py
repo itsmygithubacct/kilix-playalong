@@ -46,6 +46,7 @@ import os
 import re
 import shutil
 import uuid
+import wave
 from collections.abc import Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -1075,6 +1076,26 @@ class Pipeline:
             raise ProviderFailedError("project has no source duration")
         return float(value)
 
+    def _normalized_duration(self, fallback: float) -> float:
+        """The length of `media/normalized.wav`, or `fallback` when it cannot be read.
+
+        A source's listed length is often a whole number of seconds. Choosing an
+        LRCLIB entry against that number can pick a different recording from the
+        one the decoded audio actually is. Parsing the chosen entry still uses
+        `fallback`, which is the duration the rest of the pipeline calls the song's.
+        """
+
+        # `wave.open` on 3.10 takes a file or a string, not a path.
+        try:
+            with self._normalized_path().open("rb") as handle, wave.open(handle, "rb") as audio:
+                frames = audio.getnframes()
+                rate = audio.getframerate()
+        except (OSError, EOFError, wave.Error):
+            return fallback
+        if rate <= 0:
+            return fallback
+        return frames / rate
+
     def _normalize(self) -> tuple[list[Path], str]:
         output = self.project_dir / "media" / "normalized.wav"
         media.probe(self._source_path())
@@ -1247,8 +1268,10 @@ class Pipeline:
 
         The question is the project's title and artist, asked by `lrclib.lookup` in one
         request or, for an "A - B" title whose track-and-artist search finds nothing, two;
-        the answer is checked against the audio's length by `lrclib.choose`. See that
-        module for what leaves the machine and why matching is strict.
+        the answer is checked against the normalized audio's length by `lrclib.choose`,
+        or against the source's listed length when that file cannot be read. The entry
+        is still parsed against the source's length. See that module for what leaves
+        the machine and why matching is strict.
 
         Asked once per project and query, never per run. A match is written to
         ``source/lyrics-lrclib.json`` at 0600 and recorded under ``source.lrclib`` with
@@ -1294,7 +1317,12 @@ class Pipeline:
                 if saved is not None:
                     return saved
         try:
-            found = lrclib.lookup(title, artist, duration=duration, search=self._search_lrclib)
+            found = lrclib.lookup(
+                title,
+                artist,
+                duration=self._normalized_duration(duration),
+                search=self._search_lrclib,
+            )
         except (ProviderUnavailableError, ProviderFailedError) as error:
             if explicit:
                 raise

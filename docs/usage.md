@@ -51,9 +51,11 @@ The LRCLIB lookup is the only lyric route that uses the network. It sends an
 HTTPS request carrying the title (with asides such as "(Official Video)" and a
 leading "Artist - " removed) and the artist, with a `kilix-playalong/VERSION`
 User-Agent and nothing else. An entry is used only when its title and artist
-match and its length is within 10 seconds of the audio's, so a live take of the
-same song is not used for a studio recording. When that finds nothing and the
-title reads
+match and its length is within 10 seconds of the normalized audio
+(`media/normalized.wav`). A source's listed length is often a whole number of
+seconds, which is enough to pick a different recording; if the normalized file
+cannot be read, that listed length is used instead. The chosen entry is still
+parsed against the listed length. When that finds nothing and the title reads
 "Song - Artist" (or "Artist - Song"), one second request sends the whole title
 instead, because a video's artist is often only its uploader; the entry's artist
 may then match either half of the title. The chosen entry is saved privately in

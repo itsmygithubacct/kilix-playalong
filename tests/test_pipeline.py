@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import wave
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -2519,6 +2520,17 @@ def test_a_title_that_names_its_singer_finds_lyrics_the_uploader_would_not(
     assert lrclib_network.urls == [], "the saved entry answers for both queries"
 
 
+def _pcm_wav(path: Path, seconds: float, rate: int = 8000) -> None:
+    """A real mono WAV of `seconds`, so a test can measure it back with `wave`."""
+    frames = round(seconds * rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle, wave.open(handle, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(rate)
+        audio.writeframes(b"\x00\x00" * frames)
+
+
 def test_a_transcription_made_offline_is_not_looked_up_once_the_network_returns(
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2594,3 +2606,51 @@ def test_a_stronger_recorded_transcription_is_not_looked_up_either(
     assert lrclib_network.urls == []
     assert kept["lyrics"] is not None and kept["lyrics"]["route"] == "transcribe"
     assert _recorded_model(kept) == "large-v3"
+
+
+def test_the_lookup_measures_the_normalized_audio(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """6.4 s of audio, not the source's listed 6 s, and the entry is still parsed at 6 s."""
+    _with_transcriber(monkeypatch)
+
+    def normalize(_source: Path, output: Path, **_kwargs: object) -> Path:
+        _pcm_wav(output, 6.4)
+        return output
+
+    monkeypatch.setattr("kilix_playalong.pipeline.media.normalize", normalize)
+    lrclib_network.answer = _lrclib_answer(
+        {**_LRCLIB_ENTRY, "id": 60, "duration": 6.0},
+        {**_LRCLIB_ENTRY, "id": 64, "duration": 6.4},
+    )
+
+    project_dir, manifest = run_new(
+        PipelineOptions(url=_URL, align_supplied_text=False, rights_confirmed=True)
+    )
+
+    assert manifest["lyrics"] is not None
+    assert manifest["lyrics"]["source"] == "lrclib:64"
+    document = json.loads((project_dir / "lyrics" / "lyrics.json").read_text())
+    assert document["cues"][-1]["end"] == pytest.approx(6.0)
+
+
+def test_an_unreadable_normalized_audio_uses_the_source_length(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """The stand-in writes bytes that are not a WAV. The listed length still chooses."""
+    _with_transcriber(monkeypatch)
+    lrclib_network.answer = _lrclib_answer(
+        {**_LRCLIB_ENTRY, "id": 5, "duration": 0.5},
+        {**_LRCLIB_ENTRY, "id": 60, "duration": 6.0},
+        {**_LRCLIB_ENTRY, "id": 64, "duration": 6.4},
+    )
+
+    _project_dir, manifest = run_new(
+        PipelineOptions(url=_URL, align_supplied_text=False, rights_confirmed=True)
+    )
+
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["source"] == "lrclib:60"
