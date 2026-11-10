@@ -2346,7 +2346,7 @@ def test_an_unreachable_lrclib_falls_through_to_transcription_in_one_line(
     assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
     note = manifest["stages"]["lyrics"]["note"]
     assert note == "transcribed the vocals audio; LRCLIB skipped: LRCLIB could not be reached"
-    assert "lrclib" not in manifest["source"], "a failure records nothing, so a resume retries"
+    assert "lrclib" not in manifest["source"], "a failure records nothing"
     assert whisper_models == ["medium.en"]
 
 
@@ -2370,11 +2370,29 @@ def test_a_miss_falls_through_and_is_remembered_for_its_query(
     resume(project_dir, PipelineOptions(audio_source="mix", rights_confirmed=True))
     assert lrclib_network.urls == [], "the same question is not asked twice"
 
-    renamed = resume(
-        project_dir, PipelineOptions(title="Synthetic Song Renamed", rights_confirmed=True)
+    # The audio source stays mix so the finished transcription is still current.
+    # A new title is not a new question while that transcription stands.
+    resume(
+        project_dir,
+        PipelineOptions(audio_source="mix", title="Synthetic Song Renamed", rights_confirmed=True),
     )
-    assert len(lrclib_network.urls) == 1, "a new title is a new question"
-    assert renamed["source"]["lrclib"]["queries"] == [{"q": "Synthetic Song Renamed"}]  # type: ignore[index]
+    assert lrclib_network.urls == []
+    assert load_manifest(project_dir)["lyrics"]["route"] == "transcribe"  # type: ignore[index]
+
+    with pytest.raises(InvalidInputError, match="LRCLIB has no lyrics matching"):
+        resume(
+            project_dir,
+            PipelineOptions(
+                audio_source="mix",
+                title="Synthetic Song Explicit",
+                lyrics_source="lrclib",
+                rights_confirmed=True,
+            ),
+        )
+    assert len(lrclib_network.urls) == 1, "named explicitly, a new title is asked"
+    assert load_manifest(project_dir)["source"]["lrclib"]["queries"] == [  # type: ignore[index]
+        {"q": "Synthetic Song Explicit"}
+    ]
 
 
 def test_turning_the_lookup_off_keeps_every_route_off_the_network(
@@ -2499,3 +2517,80 @@ def test_a_title_that_names_its_singer_finds_lyrics_the_uploader_would_not(
     lrclib_network.urls.clear()
     resume(project_dir, PipelineOptions(audio_source="mix", rights_confirmed=True))
     assert lrclib_network.urls == [], "the saved entry answers for both queries"
+
+
+def test_a_transcription_made_offline_is_not_looked_up_once_the_network_returns(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """Resume and rename keep the words. Re-running the stage, or naming LRCLIB, asks."""
+    _with_transcriber(monkeypatch)
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
+    assert "lrclib" not in manifest["source"]
+    assert len(lrclib_network.urls) == 1
+
+    lrclib_network.urls.clear()
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+    resumed = resume(project_dir, PipelineOptions(rights_confirmed=True))
+    renamed = resume(
+        project_dir, PipelineOptions(title="Synthetic Song Renamed", rights_confirmed=True)
+    )
+    assert lrclib_network.urls == []
+    assert resumed["lyrics"] is not None and resumed["lyrics"]["route"] == "transcribe"
+    assert renamed["lyrics"] is not None and renamed["lyrics"]["route"] == "transcribe"
+
+    # The rename stuck, so the entry has to be the song the project is now named.
+    lrclib_network.answer = _lrclib_answer({**_LRCLIB_ENTRY, "trackName": "Synthetic Song Renamed"})
+    # The reader itself has to answer while the transcription is still finished.
+    # A refusal is swallowed while the plan is keyed, and the stage then asks
+    # again only because opening the stage clears that finished status.
+    held = Pipeline(
+        project_dir,
+        load_manifest(project_dir),
+        PipelineOptions(lyrics_source="lrclib", rights_confirmed=True),
+    )
+    assert held._lrclib_lyrics(held._duration()) is not None
+    asked = resume(project_dir, PipelineOptions(lyrics_source="lrclib", rights_confirmed=True))
+    assert len(lrclib_network.urls) == 1
+    assert asked["lyrics"] is not None and asked["lyrics"]["route"] == "lrclib"
+
+
+def test_re_running_the_lyrics_stage_asks_lrclib_again(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    _with_transcriber(monkeypatch)
+    project_dir, _manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    lrclib_network.urls.clear()
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+
+    rerun = resume(project_dir, PipelineOptions(audio_source="mix", rights_confirmed=True))
+
+    assert len(lrclib_network.urls) == 1
+    assert rerun["lyrics"] is not None and rerun["lyrics"]["route"] == "lrclib"
+
+
+def test_a_stronger_recorded_transcription_is_not_looked_up_either(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """The recorded model outranks this machine, and that transcription still stands."""
+    _with_transcriber(monkeypatch)
+    _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
+    _cache_whisper_model("large-v3")
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
+    assert _recorded_model(manifest) == "large-v3"
+
+    lrclib_network.urls.clear()
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+    _pin_hardware(monkeypatch, available_memory=4 * _GIB, cuda=False)
+    kept = resume(project_dir, PipelineOptions(rights_confirmed=True))
+
+    assert lrclib_network.urls == []
+    assert kept["lyrics"] is not None and kept["lyrics"]["route"] == "transcribe"
+    assert _recorded_model(kept) == "large-v3"

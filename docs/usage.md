@@ -53,14 +53,18 @@ leading "Artist - " removed) and the artist, with a `kilix-playalong/VERSION`
 User-Agent and nothing else. An entry is used only when its title and artist
 match and its length is within 10 seconds of the audio's, so a live take of the
 same song is not used for a studio recording. When that finds nothing and the
-title reads "Song - Artist" (or "Artist - Song"), one second request sends the
-whole title instead, because a video's artist is often only its uploader; the
-entry's artist may then match either half of the title. The chosen entry is saved
-privately in the project as `source/lyrics-lrclib.json`, and a resume reuses it
-without asking again; a miss is remembered for the same title and artist. When
-LRCLIB cannot be reached, `auto` transcribes instead and the lyrics stage note
-says why. `--no-lyrics-lookup` keeps `auto` off the network, `--lyrics-source
-lrclib` asks even then, and `--lyrics-source transcribe` never contacts LRCLIB.
+title reads
+"Song - Artist" (or "Artist - Song"), one second request sends the whole title
+instead, because a video's artist is often only its uploader; the entry's artist
+may then match either half of the title. The chosen entry is saved privately in
+the project as `source/lyrics-lrclib.json`, and a resume reuses it without asking
+again; a miss is remembered for the same title and artist. When LRCLIB cannot be
+reached, `auto` transcribes instead and the lyrics stage note says why. A later
+`auto` run keeps that finished transcription and does not ask again: a resume, a
+rename, and a project that was made offline. A change that re-runs the lyrics
+stage, such as `--audio-source`, does ask, and `--lyrics-source lrclib` always
+does. `--no-lyrics-lookup` keeps `auto` off the network, and `--lyrics-source
+transcribe` never contacts LRCLIB.
 
 LRCLIB supplies the words; faster-whisper still runs, to time each word against
 the singing. If that alignment cannot run or is rejected, the entry's own line

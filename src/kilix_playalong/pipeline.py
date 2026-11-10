@@ -153,6 +153,22 @@ LYRIC_SOURCE_CHOICES = (
     LYRIC_SOURCE_TRANSCRIBE,
 )
 
+#: The provider string the lyrics stage records. One spelling, shared by `_run_stage`
+#: and the check that a finished transcription is still the stage this run would keep.
+_LYRICS_PROVIDER = "captions-or-faster-whisper"
+
+
+def stage_fingerprint(provider: str, inputs: object) -> str:
+    """The digest `_run_stage` records for a stage and later accepts.
+
+    ``provider`` and ``inputs`` are that call's own arguments, in the same object
+    the stage stores. The lyrics route uses it to recognise a finished transcription
+    without a second copy of the digest.
+    """
+
+    return sha256_bytes(canonical_json({"provider": provider, "inputs": inputs}))
+
+
 #: What `auto` tries, in order, before falling through to transcription. Read it
 #: as "the most authoritative words available": the user's own file beats a timed
 #: sidecar they downloaded, which beats a tag inside the media, which beats the
@@ -166,7 +182,8 @@ LYRIC_SOURCE_CHOICES = (
 #: server. It answers None without asking when `PipelineOptions.lyrics_lookup` is off,
 #: and when it cannot ask -- no network, a timeout, an answer that will not parse --
 #: it answers None too and leaves one line in the stage note, so the fall-through to
-#: transcription is the same one a song with no published lyrics takes.
+#: transcription is the same one a song with no published lyrics takes. Once that
+#: transcription is a finished stage this run would keep, `auto` does not ask again.
 _AUTO_LYRIC_ROUTES = (
     LYRIC_SOURCE_FILE,
     LYRIC_SOURCE_SIDECAR,
@@ -726,7 +743,7 @@ class Pipeline:
         """
 
         def fingerprint_of(value: object) -> str:
-            return sha256_bytes(canonical_json({"provider": provider, "inputs": value}))
+            return stage_fingerprint(provider, value)
 
         fingerprint = fingerprint_of(inputs)
         # stage_is_current only re-digests artifacts once a fingerprint matches, and these
@@ -800,7 +817,7 @@ class Pipeline:
         plan, whisper, whisper_alternates = self._lyrics_keys()
         self._run_stage(
             "lyrics",
-            "captions-or-faster-whisper",
+            _LYRICS_PROVIDER,
             self._lyrics,
             inputs=self._lyrics_inputs(plan, whisper),
             alternates=self._lyrics_alternates(plan, whisper_alternates),
@@ -1194,6 +1211,37 @@ class Pipeline:
         )
         return document, sha256_file(choice.path)
 
+    def _finished_transcription_stands(self) -> bool:
+        """True when this run would keep the lyrics the project already transcribed.
+
+        The stage has to be done, the manifest has to say the route was transcription,
+        and the recorded fingerprint has to be the one this run's transcription would
+        write or one `_lyrics_alternates` still accepts. A rename does not move that
+        key. The audio source does, and then this is False and LRCLIB is asked.
+        """
+
+        lyrics = self.manifest.get("lyrics")
+        if not isinstance(lyrics, dict) or lyrics.get("route") != LYRIC_SOURCE_TRANSCRIBE:
+            return False
+        stage = self.manifest["stages"].get("lyrics")
+        if not isinstance(stage, dict) or stage.get("status") != "done":
+            return False
+        plan = _LyricsPlan(route=LYRIC_SOURCE_TRANSCRIBE, document=None, digest=None, aligns=False)
+        whisper, whisper_alternates = self._whisper_keys(plan)
+        candidates = (
+            self._lyrics_inputs(plan, whisper),
+            *self._lyrics_alternates(plan, whisper_alternates),
+        )
+        return any(
+            stage_is_current(
+                self.project_dir,
+                self.manifest,
+                "lyrics",
+                fingerprint=stage_fingerprint(_LYRICS_PROVIDER, candidate),
+            )
+            for candidate in candidates
+        )
+
     def _lrclib_lyrics(self, duration: float) -> tuple[LyricsDocument, str] | None:
         """Published lyrics for this song from LRCLIB, saved into the project on first use.
 
@@ -1208,18 +1256,27 @@ class Pipeline:
         first member is what a later run compares) and when it was retrieved; every
         later run reads that copy, so a resume never refetches and the stage key's
         ``source_sha256`` is the digest of bytes the project holds. A miss is recorded
-        too, against its queries, so `auto` does not ask again for a song LRCLIB does
-        not have -- until the title or artist changes, which is a different question.
-        `--lyrics-source lrclib` asks again past a recorded miss, because naming the
-        source is asking for it.
+        too, against its queries, so `auto` does not ask that question again until the
+        title or artist changes, and only when this run would not be keeping a finished
+        transcription. `--lyrics-source lrclib` asks again past a recorded miss, because
+        naming the source is asking for it.
+
+        Under `auto`, a project whose lyrics stage is already a finished transcription
+        is not asked when that stage is still current for the transcription this run
+        would do. That covers a resume, a rename, and a project made while LRCLIB could
+        not be reached. A change that re-runs the lyrics stage, such as the audio
+        source, does ask, and naming the source always does.
 
         Under `auto` a lookup that cannot complete -- no network, a timeout, a refusal, an
-        answer that will not parse -- answers None and records nothing, so the next run
-        asks again; `_lookup_note` keeps the one line the stage note will say about it.
-        Named explicitly, the same failure raises, like every other explicit route.
+        answer that will not parse -- answers None and records nothing. The lyrics stage
+        then transcribes, and a later run that keeps that transcription does not ask
+        again. `_lookup_note` keeps the one line the stage note will say about the
+        failure. Named explicitly, the same failure raises, like every other explicit route.
         """
         explicit = self.options.lyrics_source == LYRIC_SOURCE_LRCLIB
         if not explicit and not self.options.lyrics_lookup:
+            return None
+        if not explicit and self._finished_transcription_stands():
             return None
         title = self.manifest["title"]
         artist = self.manifest["artist"]
