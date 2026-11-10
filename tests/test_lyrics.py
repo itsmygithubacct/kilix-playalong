@@ -1817,3 +1817,43 @@ def test_a_timed_line_is_not_rewritten_as_a_rolling_caption(tmp_path: Path) -> N
         "beta gamma delta. extra",
     ]
     assert [word["start"] for word in cues[0]["words"]] == [0.0, 0.4, 0.8, 1.2]
+
+
+# --------------------------------------------------------------------------- #
+# LRCLIB entries
+# --------------------------------------------------------------------------- #
+
+_LRCLIB_SYNCED = "[00:01.00] Two folks in Nashville\n[00:04.50] \n[00:05.00] I will look to mine\n"
+
+
+def test_a_synced_lrclib_entry_keeps_its_stamps_and_its_lines_to_align() -> None:
+    """Timed and carrying `lines`: the one document that is both, and why."""
+    document = lyrics_module.parse_lrclib_lyrics(
+        _LRCLIB_SYNCED, "ignored when synced", duration=10.0, source="lrclib:7"
+    )
+    assert document.source == "lrclib:7"
+    assert document.timing == "authored" and document.has_timing
+    assert [cue["start"] for cue in document.cues] == [1.0, 5.0], "a blank stamp is no line"
+    assert document.lines == ("Two folks in Nashville", "I will look to mine")
+    assert document.lines == tuple(cue["text"] for cue in document.cues)
+    assert document.note == ""
+
+
+def test_a_plain_lrclib_entry_is_the_ordinary_untimed_case() -> None:
+    document = lyrics_module.parse_lrclib_lyrics(
+        None, "Two folks in Nashville\n\nI will look to mine\n", duration=10.0, source="lrclib:7"
+    )
+    assert document.source == "lrclib:7-estimated"
+    assert document.timing == "estimated" and not document.has_timing
+    assert document.lines == ("Two folks in Nashville", "I will look to mine")
+    assert "estimated" in document.note
+
+
+def test_an_lrclib_entry_with_no_usable_lines_is_refused() -> None:
+    for synced, plain in (("[00:01.00] \n", None), (None, "  \n"), (None, None)):
+        with pytest.raises(InvalidInputError, match="LRCLIB lyrics contain no usable"):
+            lyrics_module.parse_lrclib_lyrics(synced, plain, duration=10.0, source="lrclib:7")
+    with pytest.raises(InvalidInputError, match="limit"):
+        lyrics_module.parse_lrclib_lyrics(
+            "x" * (lyrics_module.MAX_LYRICS_BYTES + 1), None, duration=10.0, source="lrclib:7"
+        )

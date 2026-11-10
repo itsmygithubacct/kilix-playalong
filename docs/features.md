@@ -26,7 +26,9 @@ point.
   `other`) with a common playback clock plus mute and level controls for every
   stem.
 - Timed YouTube captions when available, user-supplied LRC/SRT/VTT/plain text,
-  or local faster-whisper transcription of the isolated vocal stem.
+  published lyrics looked up on LRCLIB by title, artist and length (optional,
+  source-labelled, and timed against the singing), or local faster-whisper
+  transcription of the isolated vocal stem.
 - Basic Pitch ONNX transcription of the isolated guitar stem to MIDI, followed
   by deterministic string/fret inference for standard, Drop D, or DADGAD tuning.
 - A local play-along page with synchronized lyrics and tab highlighting,

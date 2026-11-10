@@ -219,6 +219,11 @@ def _pipeline_options(
                 settings, "align_supplied_text", _default(document, "align_supplied_text")
             )
         ),
+        lyrics_lookup=bool(
+            arguments.lyrics_lookup
+            if arguments.lyrics_lookup is not None
+            else _stored_flag(settings, "lyrics_lookup", _default(document, "lyrics_lookup"))
+        ),
         device=str(
             arguments.device
             if arguments.device is not None
@@ -479,11 +484,11 @@ def _describe(
     `append_default` is off where `BooleanOptionalAction` would print the sentence itself
     and the two would read as a duplicate. That is not "always": argparse appends its own
     "(default: ...)" only when the default is neither None nor SUPPRESS, and on a resume
-    every flag here defaults to None. So `--align-supplied-text`, the only
-    `BooleanOptionalAction` in this parser, passes `append_default=resuming` -- silent on
-    `create`, where argparse writes "(default: True)" after it, and spoken on `resume`,
-    where argparse writes nothing and this would otherwise be the one line in
-    `resume --help` that does not say what leaving the flag out means.
+    every flag here defaults to None. So `--align-supplied-text` and `--lyrics-lookup`,
+    the two `BooleanOptionalAction` flags in this parser, pass `append_default=resuming`
+    -- silent on `create`, where argparse writes "(default: True)" after them, and spoken
+    on `resume`, where argparse writes nothing and these would otherwise be the lines in
+    `resume --help` that do not say what leaving the flag out means.
     """
     option = document.option(option_id)
     help_text = option.help if option is not None else ""
@@ -521,6 +526,12 @@ def _common_pipeline_options(
         choices=LYRIC_SOURCE_CHOICES,
         default=default("lyrics_source"),
         help=_describe(document, "lyrics_source", resuming=resuming),
+    )
+    parser.add_argument(
+        "--lyrics-lookup",
+        action=argparse.BooleanOptionalAction,
+        default=default("lyrics_lookup"),
+        help=_describe(document, "lyrics_lookup", resuming=resuming, append_default=resuming),
     )
     parser.add_argument(
         "--language",

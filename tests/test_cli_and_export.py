@@ -110,6 +110,7 @@ _FLAGS = {
     "whisper_model": "whisper_model",
     "audio_source": "audio_source",
     "align_supplied_text": "align_supplied_text",
+    "lyrics_lookup": "lyrics_lookup",
     "lyrics_source": "lyrics_source",
     "lyrics_path": "lyrics",
     "device": "device",
@@ -145,27 +146,30 @@ def test_every_backend_option_has_a_flag_that_defaults_to_the_document() -> None
 def test_resume_help_says_what_leaving_each_flag_out_means(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """On a resume every default is None, and argparse goes quiet on the one boolean flag.
+    """On a resume every default is None, and argparse goes quiet on the boolean flags.
 
-    `--align-supplied-text` is this parser's only `BooleanOptionalAction`. Argparse writes
-    its own "(default: ...)" only when the default is not None, which is true on `create`
-    and false on every flag of `resume` -- so without `_describe` filling it in, this is
-    the single line in `resume --help` that never says what leaving it out does, while the
-    fourteen flags around it all say "keep what the project recorded".
+    `--align-supplied-text` and `--lyrics-lookup` are this parser's two
+    `BooleanOptionalAction` flags. Argparse writes its own "(default: ...)" only when the
+    default is not None, which is true on `create` and false on every flag of `resume` --
+    so without `_describe` filling it in, these are the lines in `resume --help` that never
+    say what leaving them out does, while the flags around them all say "keep what the
+    project recorded".
     """
     with pytest.raises(SystemExit):
         main(["resume", "--help"])
     resuming = " ".join(capsys.readouterr().out.split())
-    assert "which drifts badly. (default: keep what the project recorded)" in resuming
-    # Every default line on a resume names the project's own answer -- thirteen flags
+    assert "keep their line stamps. (default: keep what the project recorded)" in resuming
+    assert "asks anyway. (default: keep what the project recorded)" in resuming
+    # Every default line on a resume names the project's own answer -- fourteen flags
     # say "keep what the project recorded", the positional says "the source the project
     # recorded" -- so none of them quotes a fresh project's value.
-    assert resuming.count("(default:") == resuming.count("recorded)") == 14
+    assert resuming.count("(default:") == resuming.count("recorded)") == 15
 
     with pytest.raises(SystemExit):
         main(["create", "--help"])
     creating = " ".join(capsys.readouterr().out.split())
-    assert "which drifts badly. (default: True)" in creating, "argparse's own sentence"
+    assert "keep their line stamps. (default: True)" in creating, "argparse's own sentence"
+    assert "asks anyway. (default: True)" in creating, "argparse's own sentence"
     assert "keep what the project recorded" not in creating
 
 

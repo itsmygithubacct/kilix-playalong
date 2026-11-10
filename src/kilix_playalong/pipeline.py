@@ -15,7 +15,8 @@ visible again.
 *The lyric routes.* `LYRIC_SOURCE_*` is the whole vocabulary and it is public
 because `options_registry` offers exactly these as its `lyrics_source` choices.
 `auto` walks `_AUTO_LYRIC_ROUTES` -- the user's own file, a sidecar, the media's
-own tag, the publisher's captions -- and falls through to transcription; an
+own tag, the publisher's captions, then LRCLIB's published lyrics, the one route
+that asks the network -- and falls through to transcription; an
 explicit choice takes its route or fails out of `_MISSING_LYRIC_SOURCE` rather
 than silently degrading into another one. `_resolve_lyrics_plan` decides that
 once, and the rest of the run reads the resolved `_LyricsPlan` instead of the raw
@@ -39,6 +40,7 @@ no longer takes.
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -50,7 +52,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from .alignment import AlignmentResult, align_lines, hypothesis_from_cues
+from .alignment import AlignmentResult, align_lines, anchor_line_starts, hypothesis_from_cues
 from .errors import (
     InvalidInputError,
     PlayalongError,
@@ -67,6 +69,7 @@ from .lyrics import (
     find_lyrics_sidecar,
     load_lyrics_document,
     parse_embedded_lyrics,
+    parse_lrclib_lyrics,
     read_bounded_text,
     select_embedded_lyrics,
     write_lyrics,
@@ -78,7 +81,7 @@ from .paths import (
     project_directory,
     projects_home,
 )
-from .providers import basic_pitch, media, separation, transcription, youtube
+from .providers import basic_pitch, lrclib, media, separation, transcription, youtube
 from .source import (
     MAX_EMBEDDED_LYRICS_BYTES,
     FileSource,
@@ -120,6 +123,7 @@ from .util import (
     sha256_bytes,
     sha256_file,
     sha256_text,
+    utc_now,
 )
 
 RIGHTS_STATEMENT = "I confirmed that I have permission to process this media and its lyrics."
@@ -137,6 +141,7 @@ LYRIC_SOURCE_CAPTIONS = "captions"
 LYRIC_SOURCE_FILE = "file"
 LYRIC_SOURCE_EMBEDDED = "embedded"
 LYRIC_SOURCE_SIDECAR = "sidecar"
+LYRIC_SOURCE_LRCLIB = "lrclib"
 LYRIC_SOURCE_TRANSCRIBE = "transcribe"
 LYRIC_SOURCE_CHOICES = (
     LYRIC_SOURCE_AUTO,
@@ -144,20 +149,30 @@ LYRIC_SOURCE_CHOICES = (
     LYRIC_SOURCE_FILE,
     LYRIC_SOURCE_EMBEDDED,
     LYRIC_SOURCE_SIDECAR,
+    LYRIC_SOURCE_LRCLIB,
     LYRIC_SOURCE_TRANSCRIBE,
 )
 
 #: What `auto` tries, in order, before falling through to transcription. Read it
 #: as "the most authoritative words available": the user's own file beats a timed
 #: sidecar they downloaded, which beats a tag inside the media, which beats the
-#: publisher's captions, which beats a machine listening to the singing. Two of
+#: publisher's captions, which beats the published lyrics LRCLIB holds for this
+#: title, artist and length, which beats a machine listening to the singing. Two of
 #: these can only ever exist for the file arm and simply answer None for a
 #: download, so one order serves both arms.
+#:
+#: LRCLIB is last of the five because it is the only one that is not already on this
+#: machine: every route before it reads something the project holds, and it asks a
+#: server. It answers None without asking when `PipelineOptions.lyrics_lookup` is off,
+#: and when it cannot ask -- no network, a timeout, an answer that will not parse --
+#: it answers None too and leaves one line in the stage note, so the fall-through to
+#: transcription is the same one a song with no published lyrics takes.
 _AUTO_LYRIC_ROUTES = (
     LYRIC_SOURCE_FILE,
     LYRIC_SOURCE_SIDECAR,
     LYRIC_SOURCE_EMBEDDED,
     LYRIC_SOURCE_CAPTIONS,
+    LYRIC_SOURCE_LRCLIB,
 )
 
 #: Why an explicitly chosen lyric source could not be used. An explicit choice
@@ -169,6 +184,7 @@ _MISSING_LYRIC_SOURCE = {
     LYRIC_SOURCE_SIDECAR: "no .lrc sidecar was found beside the source file",
     LYRIC_SOURCE_EMBEDDED: "the source carries no embedded lyrics tag",
     LYRIC_SOURCE_CAPTIONS: "the source published no caption track this can read",
+    LYRIC_SOURCE_LRCLIB: "LRCLIB has no lyrics matching this song's title, artist and length",
 }
 
 #: The two halves of the rename an accepted alignment applies to a lyric source id.
@@ -336,6 +352,10 @@ class PipelineOptions:
     whisper_model: str = transcription.DEFAULT_MODEL
     audio_source: str = transcription.DEFAULT_AUDIO_SOURCE
     align_supplied_text: bool = True
+    #: Whether `auto` may ask LRCLIB for published lyrics. Off, no route of `auto`
+    #: touches the network; `--lyrics-source lrclib` is the user asking by name and
+    #: looks up regardless, and `--lyrics-source transcribe` never looks up at all.
+    lyrics_lookup: bool = True
     device: str = "auto"
     max_duration: float = 30 * 60
     max_fret: int = 20
@@ -500,6 +520,7 @@ def create_project(options: PipelineOptions) -> tuple[Path, ProjectManifest]:
         lyrics_source=options.lyrics_source,
         audio_source=options.audio_source,
         align_supplied_text=options.align_supplied_text,
+        lyrics_lookup=options.lyrics_lookup,
     )
     _store_supplied_lyrics(project_dir, manifest, options)
     save_manifest(project_dir, manifest)
@@ -573,6 +594,15 @@ class Pipeline:
         self.options = options
         self.progress: ProgressCallback = progress or (lambda _name, _status, _detail: None)
         self._plan: _LyricsPlan | None = None
+        # One LRCLIB answer per query per run, error or not. The plan is resolved while
+        # the lyrics stage is keyed and again when it runs if keying failed, and the
+        # second resolution must not ask the server a second time.
+        self._lrclib_answers: dict[
+            tuple[tuple[str, str], ...], list[lrclib.Entry] | PlayalongError
+        ] = {}
+        # Why `auto` passed LRCLIB by this run, for the stage note when it falls through
+        # to transcription. This module's own words; never lyric text.
+        self._lookup_note = ""
         # Paths a provider can name in an exception that only become known while the
         # run is happening. `_secrets` reads them; the acquisition stage writes the
         # user's library path here, which nothing else in this process knows.
@@ -1164,6 +1194,137 @@ class Pipeline:
         )
         return document, sha256_file(choice.path)
 
+    def _lrclib_lyrics(self, duration: float) -> tuple[LyricsDocument, str] | None:
+        """Published lyrics for this song from LRCLIB, saved into the project on first use.
+
+        The question is the project's title and artist, asked by `lrclib.lookup` in one
+        request or, for an "A - B" title whose track-and-artist search finds nothing, two;
+        the answer is checked against the audio's length by `lrclib.choose`. See that
+        module for what leaves the machine and why matching is strict.
+
+        Asked once per project and query, never per run. A match is written to
+        ``source/lyrics-lrclib.json`` at 0600 and recorded under ``source.lrclib`` with
+        its digest, id, the query that found it, every query sent (``queries``, whose
+        first member is what a later run compares) and when it was retrieved; every
+        later run reads that copy, so a resume never refetches and the stage key's
+        ``source_sha256`` is the digest of bytes the project holds. A miss is recorded
+        too, against its queries, so `auto` does not ask again for a song LRCLIB does
+        not have -- until the title or artist changes, which is a different question.
+        `--lyrics-source lrclib` asks again past a recorded miss, because naming the
+        source is asking for it.
+
+        Under `auto` a lookup that cannot complete -- no network, a timeout, a refusal, an
+        answer that will not parse -- answers None and records nothing, so the next run
+        asks again; `_lookup_note` keeps the one line the stage note will say about it.
+        Named explicitly, the same failure raises, like every other explicit route.
+        """
+        explicit = self.options.lyrics_source == LYRIC_SOURCE_LRCLIB
+        if not explicit and not self.options.lyrics_lookup:
+            return None
+        title = self.manifest["title"]
+        artist = self.manifest["artist"]
+        parameters = lrclib.query(title, artist)
+        if not any(value.strip() for value in parameters.values()):
+            return None
+        recorded = self.manifest["source"].get("lrclib")
+        asked = recorded.get("queries") if isinstance(recorded, dict) else None
+        if isinstance(recorded, dict) and isinstance(asked, list) and asked[:1] == [parameters]:
+            if recorded.get("id") is None:
+                if not explicit:
+                    return None
+            else:
+                saved = self._saved_lrclib(recorded, duration)
+                if saved is not None:
+                    return saved
+        try:
+            found = lrclib.lookup(title, artist, duration=duration, search=self._search_lrclib)
+        except (ProviderUnavailableError, ProviderFailedError) as error:
+            if explicit:
+                raise
+            self._lookup_note = f"LRCLIB skipped: {public_error(str(error))}"
+            return None
+        entry = found.entry
+        queries = [dict(asked_query) for asked_query in found.queries]
+        if entry is None:
+            self.manifest["source"]["lrclib"] = {
+                "id": None,
+                "queries": queries,
+                "retrieved_at": utc_now(),
+            }
+            self._save()
+            self._lookup_note = "LRCLIB had no lyrics matching this title, artist and length"
+            return None
+        data = canonical_json(entry.as_json())
+        path = ensure_private_directory(self.project_dir / "source") / "lyrics-lrclib.json"
+        private_write(path, data)
+        digest = sha256_bytes(data)
+        self.manifest["source"]["lrclib"] = {
+            "path": path.relative_to(self.project_dir).as_posix(),
+            "sha256": digest,
+            "id": entry.id,
+            "query": found.query,
+            "queries": queries,
+            "retrieved_at": utc_now(),
+            "synced": bool((entry.synced or "").strip()),
+        }
+        self._save()
+        return self._lrclib_document(entry, duration), digest
+
+    def _search_lrclib(self, parameters: dict[str, str]) -> list[lrclib.Entry]:
+        """`lrclib.search`, asked at most once per query by this run."""
+        key = tuple(sorted(parameters.items()))
+        if key not in self._lrclib_answers:
+            try:
+                self._lrclib_answers[key] = lrclib.search(parameters)
+            except (ProviderUnavailableError, ProviderFailedError) as error:
+                self._lrclib_answers[key] = error
+        answer = self._lrclib_answers[key]
+        if isinstance(answer, PlayalongError):
+            raise answer
+        return answer
+
+    def _saved_lrclib(
+        self,
+        recorded: dict[str, object],
+        duration: float,
+    ) -> tuple[LyricsDocument, str] | None:
+        """The project's own copy of the entry a past run chose; None if it is gone.
+
+        Gone means looked up again, which is the only way to get it back. Present and
+        unreadable is an error rather than a silent refetch, exactly as an unreadable
+        sidecar or supplied file is: the project holds a lyrics source it cannot use,
+        and replacing it behind the user's back would hide that. The digest is of the
+        bytes as they are now, like every other route's, so an edited copy re-keys the
+        stage instead of being mistaken for the one recorded.
+        """
+        relative = recorded.get("path")
+        if not isinstance(relative, str):
+            return None
+        path = project_artifact(self.project_dir, relative)
+        if not path.is_file():
+            return None
+        text = read_bounded_text(
+            path, limit=lrclib.MAX_RESPONSE_BYTES, what="the saved LRCLIB lyrics"
+        )
+        try:
+            value = json.loads(text)
+        # RecursionError for the reason `lyrics.load_lyrics_document` names it.
+        except (json.JSONDecodeError, RecursionError) as error:
+            raise InvalidInputError("the saved LRCLIB lyrics are malformed") from error
+        entry = lrclib.entry_from_json(value)
+        if entry is None or not entry.has_lyrics:
+            raise InvalidInputError("the saved LRCLIB lyrics are malformed")
+        return self._lrclib_document(entry, duration), sha256_file(path)
+
+    @staticmethod
+    def _lrclib_document(entry: lrclib.Entry, duration: float) -> LyricsDocument:
+        return parse_lrclib_lyrics(
+            entry.synced,
+            entry.plain,
+            duration=duration,
+            source=f"{LYRIC_SOURCE_LRCLIB}:{entry.id}",
+        )
+
     def _lyrics_plan(self) -> _LyricsPlan:
         if self._plan is None:
             self._plan = self._resolve_lyrics_plan()
@@ -1187,6 +1348,7 @@ class Pipeline:
             LYRIC_SOURCE_SIDECAR: self._sidecar_lyrics,
             LYRIC_SOURCE_EMBEDDED: self._embedded_lyrics,
             LYRIC_SOURCE_CAPTIONS: self._caption_lyrics,
+            LYRIC_SOURCE_LRCLIB: self._lrclib_lyrics,
         }
         if requested != LYRIC_SOURCE_AUTO:
             found = readers[requested](duration)
@@ -1200,12 +1362,21 @@ class Pipeline:
         return _LyricsPlan(route=LYRIC_SOURCE_TRANSCRIBE, document=None, digest=None, aligns=False)
 
     def _plan_for(self, route: str, found: tuple[LyricsDocument, str]) -> _LyricsPlan:
+        """The plan for words found on `route`, and whether their timing gets measured.
+
+        Untimed words are aligned, and so are LRCLIB's timed ones: a synced entry is LRC,
+        a stamp per line and nothing inside it, so the transcript is still what times
+        the words. Its line stamps stay in the document as the fallback when alignment
+        cannot run or is rejected, and as the witness `_apply_alignment` holds the
+        aligned line starts to.
+        """
         document, digest = found
+        measures = not document.has_timing or route == LYRIC_SOURCE_LRCLIB
         return _LyricsPlan(
             route=route,
             document=document,
             digest=digest,
-            aligns=self.options.align_supplied_text and not document.has_timing,
+            aligns=self.options.align_supplied_text and measures,
         )
 
     # -------------------------------------------------------- keying the lyrics
@@ -1324,8 +1495,9 @@ class Pipeline:
     def _transcript_is_needed(self, plan: _LyricsPlan) -> bool:
         """True when this run would ask the worker for a transcript.
 
-        Two reasons, and only two: transcription is the lyric source, or the words
-        arrived with no timing and alignment is going to measure it from the singing.
+        Two reasons, and only two: transcription is the lyric source, or alignment is
+        going to measure the words' timing from the singing -- because they arrived with
+        none, or because they came from LRCLIB, whose line stamps time no word.
         """
         return plan.route == LYRIC_SOURCE_TRANSCRIBE or plan.aligns
 
@@ -1384,7 +1556,9 @@ class Pipeline:
         own. It is one of exactly two things `_transcript_is_needed` consults, so for every
         route but transcription "this run aligns" and "``whisper`` is not None" are the same
         statement -- and where they are not, the option changes nothing: words that arrived
-        with their own timing are never aligned whichever way the flag is set. A separate
+        with their own timing are never aligned whichever way the flag is set. LRCLIB's
+        words are the one timed source that *is* aligned (`_plan_for`), and for them the
+        flag moves ``whisper`` exactly as it does for untimed words. A separate
         ``align`` field would therefore be a key dimension that cannot move an outcome, and
         a comment claiming otherwise. The two halves of
         `test_turning_alignment_off_re_runs_the_lyrics_stage` pin both directions: flipping
@@ -1469,6 +1643,8 @@ class Pipeline:
             self._transcribe_audio(output)
             document = load_lyrics_document(output, duration=duration)
             note = f"transcribed the {self.options.audio_source} audio"
+            if self._lookup_note:
+                note = f"{note}; {self._lookup_note}"
         else:
             document = plan.document
             note = f"lyrics from {plan.route}"
@@ -1496,8 +1672,30 @@ class Pipeline:
             language=document.language,
             visible=True,
         )
+        if plan.route == LYRIC_SOURCE_LRCLIB:
+            record["lookup"] = self._lookup_record(document)
         self.manifest["lyrics"] = record
         return artifacts, note
+
+    def _lookup_record(self, document: LyricsDocument) -> dict[str, object]:
+        """Where looked-up lyrics came from and how they ended up timed, for the manifest.
+
+        ``timing`` is the question a reader of the lyrics asks first, in three words:
+        ``aligned`` when the transcript timed every word, ``lrc-lines`` when LRCLIB's own
+        line stamps were kept (alignment off, unavailable or rejected), ``estimated``
+        when the entry had no stamps and the words are spread evenly. No lyric text: the
+        query is the title and artist this manifest already holds.
+        """
+        recorded = self.manifest["source"].get("lrclib")
+        found = recorded if isinstance(recorded, dict) else {}
+        timing = {"measured": "aligned", "authored": "lrc-lines"}.get(document.timing, "estimated")
+        return {
+            "provider": "lrclib",
+            "id": found.get("id"),
+            "query": found.get("query"),
+            "retrieved_at": found.get("retrieved_at"),
+            "timing": timing,
+        }
 
     def _apply_alignment(
         self,
@@ -1530,6 +1728,12 @@ class Pipeline:
         * impossible -- the words land anyway, estimate and suffix intact. Failing the stage
           would cost the user the words they already had over an improvement they merely
           asked for, and they supplied those words themselves.
+
+        LRCLIB's synced lyrics are the one *timed* document handed here (`_plan_for`), and
+        for them "the estimate" in all three reads "the entry's own line stamps": rejected
+        or impossible keeps those, ``authored`` and without a suffix, and the note says
+        so. Accepted, the measured lines are first held to those stamps by
+        `alignment.anchor_line_starts`, and what it did is recorded beside the report.
 
         Three ways into that third case: the `transcribe` extra is not installed, so
         `is_available()` is False; it is installed but will not resolve a model to run,
@@ -1571,8 +1775,13 @@ class Pipeline:
         it would record a finished stage under this run's key, and the alignment would never
         be attempted again for those options.
         """
+        # What a skipped or rejected alignment leaves the words with: their source's own
+        # line stamps when they came with some (LRCLIB's synced lyrics), else the spread.
+        kept = "the source's line timing" if document.has_timing else "estimated spacing"
         if not transcription.is_available():
             record["alignment"] = {"applied": False, "reason": "no transcriber"}
+            if document.has_timing:
+                return document, f"alignment skipped: no transcriber, so {kept} is kept"
             return (
                 document,
                 "alignment skipped: timed lyrics are unavailable, so the spacing is estimated",
@@ -1591,11 +1800,12 @@ class Pipeline:
             return document, f"alignment skipped: {public_error(str(error))}"
         artifacts.append(transcript_path)
         report = result.report
-        record["alignment"] = {"applied": report.usable, **report.as_json()}
+        alignment_record: dict[str, object] = {"applied": report.usable, **report.as_json()}
+        record["alignment"] = alignment_record
         if not report.usable:
             return (
                 document,
-                f"alignment rejected, estimated spacing kept: {report.summary()}",
+                f"alignment rejected, {kept} kept: {report.summary()}",
             )
         # The transcript knows what language was sung; an imported sheet almost never does.
         language = document.language if document.language != "unknown" else hypothesis.language
@@ -1606,13 +1816,26 @@ class Pipeline:
             "mean_displacement": report.mean_displacement,
             "usable": report.usable,
         }
+        cues = result.cues()
+        summary = report.summary()
+        if document.has_timing:
+            # The source stamped every line, so a line the aligner started long before its
+            # stamp is held to it: `alignment.anchor_line_starts` says when and why.
+            cues, anchor = anchor_line_starts(
+                [(cue["text"], cue["start"]) for cue in document.cues], cues
+            )
+            alignment_record["anchor"] = anchor.as_json()
+            if anchor.moved_lines:
+                summary = (
+                    f"{summary}; {anchor.moved_lines} line start(s) held to the source's stamps"
+                )
         # `lines` and `note` described the estimate that has just been replaced: the
         # words are timed now, so there is nothing left to hand an aligner and nothing
         # left to warn about.
         return (
             replace(
                 document,
-                cues=result.cues(),
+                cues=cues,
                 source=_aligned_source(document.source),
                 language=language,
                 timing="measured",
@@ -1620,7 +1843,7 @@ class Pipeline:
                 lines=(),
                 note="",
             ),
-            report.summary(),
+            summary,
         )
 
     # ------------------------------------------------------- tab and printable
@@ -1787,6 +2010,7 @@ def resume(
         lyrics_source=options.lyrics_source,
         audio_source=options.audio_source,
         align_supplied_text=options.align_supplied_text,
+        lyrics_lookup=options.lyrics_lookup,
     )
     save_manifest(project_dir, manifest)
     return Pipeline(project_dir, manifest, options, progress).run()
