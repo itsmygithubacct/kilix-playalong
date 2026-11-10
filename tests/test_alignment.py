@@ -1581,3 +1581,96 @@ def test_a_reference_of_pasted_prose_is_refused_on_characters_before_tokens() ->
     assert str(MAX_REFERENCE_CHARS) in message
     assert "character" in message
     assert "x" * 20 not in message
+
+
+# --------------------------------------------------------------------------- #
+# Holding aligned line starts to their source's stamps
+# --------------------------------------------------------------------------- #
+
+
+def _aligned_cue(text: str, words: list[tuple[float, float]]) -> dict[str, object]:
+    pieces = text.split()
+    assert len(pieces) == len(words)
+    return {
+        "start": words[0][0],
+        "end": words[-1][1],
+        "text": text,
+        "words": [
+            {"start": start, "end": end, "text": piece}
+            for piece, (start, end) in zip(pieces, words, strict=True)
+        ],
+    }
+
+
+#: The shape found on a real song: lines aligned about 0.6 s before their stamps,
+#: and the third line's first word handed a time from an earlier "Out", so it starts
+#: nineteen seconds early and is held across the whole gap.
+_STAMPED = [("Sing it low", 10.0), ("Sing it slow", 20.0), ("Out on the road", 180.0)]
+_ALIGNED = [
+    _aligned_cue("Sing it low", [(9.4, 9.8), (9.8, 10.2), (10.2, 11.0)]),
+    _aligned_cue("Sing it slow", [(19.4, 19.7), (19.7, 20.1), (20.1, 21.0)]),
+    _aligned_cue(
+        "Out on the road", [(161.45, 180.6), (180.6, 180.9), (180.9, 181.1), (181.1, 182.0)]
+    ),
+]
+
+
+def test_a_first_word_stretched_back_over_a_gap_is_held_to_its_stamp() -> None:
+    cues, report = alignment.anchor_line_starts(_STAMPED, _ALIGNED)  # type: ignore[arg-type]
+
+    assert report.applied and report.moved_lines == 1
+    assert report.offset == pytest.approx(-0.6)
+    moved = cues[2]
+    assert moved["start"] == pytest.approx(179.4)
+    assert moved["words"][0]["start"] == pytest.approx(179.4)
+    assert moved["words"][0]["end"] == 180.6, "only the start moves"
+    assert [cue["start"] for cue in cues[:2]] == [9.4, 19.4], "lines near their stamps stay"
+    assert _ALIGNED[2]["start"] == 161.45, "the input is not modified"
+
+
+def test_the_offset_is_a_median_that_one_bad_line_cannot_drag() -> None:
+    """With a mean, the nineteen-second outlier would shift every expected start by six."""
+    _cues, report = alignment.anchor_line_starts(_STAMPED, _ALIGNED)  # type: ignore[arg-type]
+    assert report.offset == pytest.approx(-0.6)
+
+
+def test_a_line_placed_early_as_a_whole_is_left_alone() -> None:
+    """Early, but its first word ends before the stamp: two witnesses disagree, and there
+    is no third to settle it, so the aligner's measurement stands."""
+    aligned = [
+        _ALIGNED[0],
+        _ALIGNED[1],
+        _aligned_cue(
+            "Out on the road", [(170.0, 170.4), (170.4, 170.8), (170.8, 171.0), (171.0, 172.0)]
+        ),
+    ]
+    cues, report = alignment.anchor_line_starts(_STAMPED, aligned)  # type: ignore[arg-type]
+    assert report.applied and report.moved_lines == 0
+    assert cues[2]["start"] == 170.0
+
+
+def test_a_line_within_the_allowance_is_left_alone() -> None:
+    aligned = [
+        _ALIGNED[0],
+        _ALIGNED[1],
+        _aligned_cue(
+            "Out on the road", [(178.0, 180.6), (180.6, 180.9), (180.9, 181.1), (181.1, 182.0)]
+        ),
+    ]
+    cues, report = alignment.anchor_line_starts(_STAMPED, aligned)  # type: ignore[arg-type]
+    assert report.moved_lines == 0, "1.4 s early is inside the two-second allowance"
+    assert cues[2]["start"] == 178.0
+
+
+def test_lines_the_aligner_dropped_are_dropped_before_pairing() -> None:
+    stamped = [("[Chorus]", 5.0), ("   ", 6.0), *_STAMPED, ("(Instrumental)", 200.0)]
+    _cues, report = alignment.anchor_line_starts(stamped, _ALIGNED)  # type: ignore[arg-type]
+    assert report.applied and report.moved_lines == 1
+
+
+def test_lines_that_do_not_pair_are_reported_and_not_guessed_at() -> None:
+    for stamped in (_STAMPED[:2], [*_STAMPED[:2], ("Out on the highway", 180.0)], []):
+        cues, report = alignment.anchor_line_starts(stamped, _ALIGNED)  # type: ignore[arg-type]
+        assert not report.applied and report.moved_lines == 0 and report.offset == 0.0
+        assert cues == _ALIGNED
+    assert report.as_json() == {"applied": False, "offset": 0.0, "moved_lines": 0}

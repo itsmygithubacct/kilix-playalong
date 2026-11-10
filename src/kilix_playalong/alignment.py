@@ -290,12 +290,17 @@ Known limits, stated rather than hidden
   there and this module currently has no way to know. The reproduction is kept
   in ``test_a_repeated_token_can_be_matched_to_the_wrong_occurrence...`` so that
   the limit stays visible and any future fix has a case to prove itself on.
+  Where the sheet arrived with line stamps of its own -- LRCLIB's synced lyrics
+  -- ``anchor_line_starts`` uses them as a second witness and pulls a line
+  start that went this way back to its stamp; a sheet without stamps has no
+  such witness and the limit stands for it.
 """
 
 from __future__ import annotations
 
 import math
 import re
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -1894,3 +1899,116 @@ def hypothesis_from_cues(cues: Sequence[LyricCue]) -> list[LyricWord]:
             )
             cursor += share
     return words
+
+
+# --------------------------------------------------------------------------- #
+# Holding an aligned line to the stamp its source gave it
+# --------------------------------------------------------------------------- #
+
+#: How far before its source's own stamp an aligned line may start and still be
+#: believed. Two seconds is longer than any lead-in a line stamp is placed with by
+#: hand, and far shorter than the gap a wrong-occurrence match opens up -- the case
+#: this exists for put a first word nineteen seconds early.
+ANCHOR_EARLY_SECONDS = 2.0
+
+
+@dataclass(frozen=True)
+class AnchorReport:
+    """What `anchor_line_starts` did: numbers only, like `AlignmentReport`.
+
+    ``applied`` is False when the stamped lines and the aligned cues could not be
+    paired one to one, in which case nothing was moved and ``offset`` is 0.
+    """
+
+    applied: bool
+    #: Median of (aligned start - stamp) over the paired lines, in seconds: how far the
+    #: source's clock sits from this audio's.
+    offset: float
+    moved_lines: int
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "applied": self.applied,
+            "offset": round(self.offset, 3),
+            "moved_lines": self.moved_lines,
+        }
+
+
+def _alignable_line(line: str) -> bool:
+    """The test `_build_reference` applies before a line becomes an `AlignedLine`."""
+    stripped = line.strip()
+    return bool(stripped) and not _is_marker(stripped) and bool(stripped.split())
+
+
+def anchor_line_starts(
+    stamped: Sequence[tuple[str, float]],
+    cues: Sequence[LyricCue],
+    *,
+    early: float = ANCHOR_EARLY_SECONDS,
+) -> tuple[list[LyricCue], AnchorReport]:
+    """Pull an aligned line's start forward to its source's stamp where it ran away early.
+
+    `stamped` is the sheet ``align_lines`` was given, each line with the start its
+    source stamped on it; `cues` is ``AlignmentResult.cues()`` for that sheet. The
+    stamps are a second witness to when each line begins, and this is the one
+    question that witness settles: the aligner can donate a line's first word a time
+    from an earlier occurrence of the same token -- the OPEN limit in the module
+    docstring -- and the word's span then stretches back over everything sung in
+    between. A stamp cannot say anything inside a line, so nothing else is moved.
+
+    The source's clock need not be this audio's: a video with an intro, an LRC made
+    against another master. So the expected start of a line is its stamp plus the
+    *median* offset between aligned starts and stamps, which one bad line cannot drag.
+    A line moves only when its first word starts more than `early` seconds before
+    that expected start *and* is still sounding at it. The second clause is what
+    separates a word stretched back over a gap -- the case above -- from a line the
+    aligner placed early as a whole, which is a disagreement between two witnesses
+    that this function has no third one to settle, and leaves alone.
+
+    Moving a start forward inside the span of its own first word keeps every
+    invariant the cues already had: the word still ends after it starts, the line
+    still contains its words, and the gap to the previous line only widens.
+
+    The lines are paired with the cues after dropping what `_build_reference` drops
+    -- blank lines and section markers -- and only when that leaves the same number
+    of lines with the same text in the same order. Anything else is reported as not
+    applied rather than guessed at.
+    """
+
+    kept = [(line.strip(), float(stamp)) for line, stamp in stamped if _alignable_line(line)]
+    result: list[LyricCue] = [
+        {
+            "start": cue["start"],
+            "end": cue["end"],
+            "text": cue["text"],
+            "words": [
+                {"start": word["start"], "end": word["end"], "text": word["text"]}
+                for word in cue["words"]
+            ],
+        }
+        for cue in cues
+    ]
+    if (
+        not kept
+        or len(kept) != len(result)
+        or any(text != cue["text"] for (text, _stamp), cue in zip(kept, result, strict=True))
+        or not all(math.isfinite(stamp) for _text, stamp in kept)
+    ):
+        return result, AnchorReport(applied=False, offset=0.0, moved_lines=0)
+    offset = float(
+        statistics.median(
+            cue["start"] - stamp for (_text, stamp), cue in zip(kept, result, strict=True)
+        )
+    )
+    moved = 0
+    for (_text, stamp), cue in zip(kept, result, strict=True):
+        words = cue["words"]
+        if not words:
+            continue
+        expected = stamp + offset
+        first = words[0]
+        if first["start"] < expected - early and expected < first["end"]:
+            first["start"] = expected
+            cue["start"] = expected
+            moved += 1
+    return result, AnchorReport(applied=True, offset=offset, moved_lines=moved)
