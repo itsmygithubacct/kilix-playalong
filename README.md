@@ -4,8 +4,9 @@ Kilix Playalong turns a YouTube song URL into a private guitar-practice project:
 independently controllable audio stems, timed lyrics, a MIDI transcription of
 the isolated guitar stem, a timed guitar tab, and a self-contained printable
 song sheet. Processing stays on the local machine after the explicitly
-requested download; the one other request is an optional LRCLIB lyrics lookup by
-title and artist, which `--no-lyrics-lookup` turns off.
+requested download; the one other request is a lyrics lookup on the public
+LRCLIB server, which sends the title and artist once per song (misses are cached)
+and which `--no-lyrics-lookup` turns off.
 
 Installable on demand from the Kilix content catalog as `playalong`
 (`kilix install playalong`). `kilix playalong [ARGS]` installs the pinned
@@ -96,6 +97,33 @@ providers.
 
 Common `create` options include `--lyrics FILE`, `--tuning`, `--max-fret`
 and `--whisper-model`. Worked examples are in [docs/usage.md](docs/usage.md).
+
+## Lyric lookup (LRCLIB)
+
+When a song has no lyrics file, sidecar, tag or caption track, `create` looks it
+up on the public [LRCLIB](https://lrclib.net) server before falling back to
+faster-whisper. It is on by default. The request sends only the song's title and
+artist (one request, or two for an "Artist - Song" title), once per song: a
+match is saved in the project, and a miss is cached there too, so a resume does
+not ask again. `--no-lyrics-lookup` turns it off, and `--lyrics-source
+transcribe` never contacts LRCLIB. Details are in
+[docs/usage.md](docs/usage.md#where-the-lyrics-come-from) and
+[docs/rights-and-privacy.md](docs/rights-and-privacy.md).
+
+## Songbook export
+
+```bash
+kilix-playalong songbook song-PROJECT_ID --output ./my-songbook
+```
+
+writes an offline folder: `index.html`, a single page with the lyrics beside the
+tab, note names, chord labels, editable section markers and loops, plus MP3s of
+the full song and the guitar stem. Copy the folder whole and open `index.html`
+in any browser; it needs no network and no Playalong install. The export reads
+only the project's finished tab and lyrics; it downloads nothing and runs no
+model. `--no-audio` leaves out the MP3s, and `--lyrics FILE` and
+`--arrangement FILE` start it from corrected lyrics and known sections. See
+[docs/usage.md](docs/usage.md#export-a-guitar-songbook).
 
 ## Keyboard controls for the multitrack player
 

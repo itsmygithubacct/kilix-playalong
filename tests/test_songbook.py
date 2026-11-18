@@ -221,6 +221,9 @@ def test_audio_export_and_failed_replacement_keep_a_working_book(
     assert set(data["audio"]) == {"mix", "guitar"}
     assert all((output / name).stat().st_size > 1000 for name in data["audio"].values())
     original = {file.name: file.read_bytes() for file in output.iterdir()}
+    # A changed mix converts first, under a new name, and only then does the
+    # guitar fail: that new recording must not be published beside the old page.
+    make_tone(project / "media/normalized.wav", seconds=5)
     (project / "stems/guitar.wav").write_bytes(b"broken audio")
     with pytest.raises(ProviderFailedError):
         songbook.export_songbook(project, output)
