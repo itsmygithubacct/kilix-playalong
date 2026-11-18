@@ -290,12 +290,20 @@ Known limits, stated rather than hidden
   there and this module currently has no way to know. The reproduction is kept
   in ``test_a_repeated_token_can_be_matched_to_the_wrong_occurrence...`` so that
   the limit stays visible and any future fix has a case to prove itself on.
+  Where the sheet arrived with line stamps of its own -- LRCLIB's synced lyrics
+  -- ``anchor_line_starts`` uses them as a second witness and moves any line
+  that starts more than two seconds before its stamp, whether or not its first
+  word is still sounding there. Only the words that start that early move. A
+  line is never moved earlier than the aligner placed it, and never into the
+  next line. A sheet without stamps has no such witness and the limit stands
+  for it.
 """
 
 from __future__ import annotations
 
 import math
 import re
+import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -1894,3 +1902,210 @@ def hypothesis_from_cues(cues: Sequence[LyricCue]) -> list[LyricWord]:
             )
             cursor += share
     return words
+
+
+# --------------------------------------------------------------------------- #
+# Holding an aligned line to the stamp its source gave it
+# --------------------------------------------------------------------------- #
+
+#: How far before its expected start -- the source's stamp plus the median offset --
+#: an aligned line may begin and still be believed. Two seconds is longer than any
+#: lead-in a line stamp is placed with by hand, and far shorter than the gap a wrong
+#: placement opens up. A line that starts further before that point is moved forward,
+#: whether or not its first word is still sounding there.
+ANCHOR_EARLY_SECONDS = 2.0
+
+
+@dataclass(frozen=True)
+class AnchorReport:
+    """What `anchor_line_starts` did: numbers only, like `AlignmentReport`.
+
+    ``applied`` is False when the stamped lines and the aligned cues could not be
+    paired one to one, in which case nothing was moved and ``offset`` is 0.
+    """
+
+    applied: bool
+    #: Median of (aligned start - stamp) over the paired lines, in seconds: how far the
+    #: source's clock sits from this audio's.
+    offset: float
+    moved_lines: int
+
+    def as_json(self) -> dict[str, object]:
+        return {
+            "applied": self.applied,
+            "offset": round(self.offset, 3),
+            "moved_lines": self.moved_lines,
+        }
+
+
+def _alignable_line(line: str) -> bool:
+    """The test `_build_reference` applies before a line becomes an `AlignedLine`."""
+    stripped = line.strip()
+    return bool(stripped) and not _is_marker(stripped) and bool(stripped.split())
+
+
+def _span_onto(
+    words: list[LyricWord],
+    src_start: float,
+    src_end: float,
+    dst_start: float,
+    dst_end: float,
+) -> None:
+    """Map `words` linearly from ``[src_start, src_end]`` onto ``[dst_start, dst_end]``.
+
+    The first word's start and the last word's end land on the destination's ends
+    exactly, so a one-word run keeps the end it is being sung into.
+    """
+
+    if not words or dst_end < dst_start:
+        return
+    src = src_end - src_start
+    dst = dst_end - dst_start
+    if src > 0:
+        for word in words:
+            word["start"] = dst_start + (word["start"] - src_start) * dst / src
+            word["end"] = dst_start + (word["end"] - src_start) * dst / src
+    words[0]["start"] = dst_start
+    words[-1]["end"] = dst_end
+    for word in words:
+        if word["end"] < word["start"]:
+            word["end"] = word["start"]
+
+
+def _hold_early_line(
+    cue: LyricCue,
+    expected: float,
+    following: float,
+    early: float,
+) -> bool:
+    """Move the words of `cue` that start more than `early` before `expected`.
+
+    `following` is the next line's final start, or infinity for the last line.
+    Nothing moves earlier than the aligner placed it, and nothing is moved so
+    that it starts at or after `following`. Returns whether a time changed.
+    """
+
+    words = cue["words"]
+    if not words:
+        return False
+    limit = expected - early
+    early_count = 0
+    while early_count < len(words) and words[early_count]["start"] < limit:
+        early_count += 1
+    if early_count == 0:
+        return False
+    first = words[0]["start"]
+    # The next line already starts at or before this one. Moving forward would
+    # go further into it, and moving backward is forbidden.
+    if not math.isfinite(first) or first >= following:
+        return False
+    before = [(word["start"], word["end"]) for word in words]
+    end = cue["end"]
+    count = len(words)
+    if early_count < count:
+        # A prefix is early. Sing that run into the first word that is kept.
+        hi = words[early_count]["start"]
+        run_end = words[early_count - 1]["end"]
+        run_len = max(0.0, run_end - first)
+        lo = max(first, min(expected, hi - MIN_WORD_SECONDS * early_count))
+        new_start = max(lo, hi - run_len)
+        if new_start > hi:
+            return False
+        _span_onto(words[:early_count], first, max(run_end, first), new_start, hi)
+        cue["start"] = words[0]["start"]
+    elif end > expected:
+        # The whole line is early and it already finishes after the stamp.
+        # Compress it into the span that ends where it already ended.
+        lo = max(first, min(expected, end - MIN_WORD_SECONDS * count))
+        if lo > end:
+            return False
+        _span_onto(words, first, max(end, first), lo, end)
+        cue["start"] = words[0]["start"]
+        cue["end"] = words[-1]["end"]
+    else:
+        # The whole line finished at or before the stamp. Translate it there
+        # and keep its length, unless that would enter the next line.
+        length = max(0.0, end - first)
+        lo = max(first, min(expected, following - MIN_WORD_SECONDS * count))
+        dest_end = min(lo + length, following)
+        if dest_end < lo:
+            return False
+        if dest_end == lo + length:
+            delta = lo - first
+            for word in words:
+                word["start"] += delta
+                word["end"] += delta
+        else:
+            _span_onto(words, first, max(end, first), lo, dest_end)
+        cue["start"] = words[0]["start"]
+        cue["end"] = words[-1]["end"]
+    return [(word["start"], word["end"]) for word in words] != before
+
+
+def anchor_line_starts(
+    stamped: Sequence[tuple[str, float]],
+    cues: Sequence[LyricCue],
+    *,
+    early: float = ANCHOR_EARLY_SECONDS,
+) -> tuple[list[LyricCue], AnchorReport]:
+    """Pull an aligned line forward to its source's stamp when it starts too early.
+
+    `stamped` is the sheet ``align_lines`` was given, each line with the start its
+    source stamped on it; `cues` is ``AlignmentResult.cues()`` for that sheet. The
+    stamps are a second witness to when each line begins. The aligner can donate a
+    line's first word a time from an earlier occurrence of the same token -- the
+    OPEN limit in the module docstring -- and that word then stretches back over
+    everything sung in between. It can also place a whole line early, or only the
+    line's leading words. A stamp cannot say anything about a word that is already
+    where the stamp says the line is, so only the words that start early move.
+
+    The source's clock need not be this audio's: a video with an intro, an LRC made
+    against another master. So the expected start of a line is its stamp plus the
+    *median* offset between aligned starts and stamps, which one bad line cannot drag.
+    A line moves when its start is more than `early` seconds before that expected
+    start. Lines are settled from the last, so each one knows the next line's final
+    start. A prefix of early words is sung into the first word that stays; a line
+    that is early all the way through and already ends after its stamp is compressed
+    up to that end; a line that finishes early is translated to its stamp, keeping
+    its length unless that would cross the next line. A line is never moved earlier
+    than the aligner placed it, and never into the next line.
+
+    The lines are paired with the cues after dropping what `_build_reference` drops
+    -- blank lines and section markers -- and only when that leaves the same number
+    of lines with the same text in the same order. Anything else is reported as not
+    applied rather than guessed at.
+    """
+
+    kept = [(line.strip(), float(stamp)) for line, stamp in stamped if _alignable_line(line)]
+    result: list[LyricCue] = [
+        {
+            "start": cue["start"],
+            "end": cue["end"],
+            "text": cue["text"],
+            "words": [
+                {"start": word["start"], "end": word["end"], "text": word["text"]}
+                for word in cue["words"]
+            ],
+        }
+        for cue in cues
+    ]
+    if (
+        not kept
+        or len(kept) != len(result)
+        or any(text != cue["text"] for (text, _stamp), cue in zip(kept, result, strict=True))
+        or not all(math.isfinite(stamp) for _text, stamp in kept)
+    ):
+        return result, AnchorReport(applied=False, offset=0.0, moved_lines=0)
+    offset = float(
+        statistics.median(
+            cue["start"] - stamp for (_text, stamp), cue in zip(kept, result, strict=True)
+        )
+    )
+    moved = 0
+    following = math.inf
+    pairs = list(zip(kept, result, strict=True))
+    for (_text, stamp), cue in reversed(pairs):
+        if cue["words"] and _hold_early_line(cue, stamp + offset, following, early):
+            moved += 1
+        following = cue["start"]
+    return result, AnchorReport(applied=True, offset=offset, moved_lines=moved)

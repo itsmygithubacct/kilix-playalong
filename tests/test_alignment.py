@@ -26,6 +26,7 @@ from kilix_playalong.alignment import (
     MAX_REFERENCE_CHARS,
     MAX_TOKENS,
     MIN_CUE_SPAN_SECONDS,
+    MIN_WORD_SECONDS,
     USABLE_MATCHED_FRACTION,
     USABLE_MEAN_DISPLACEMENT,
     USABLE_UNALIGNED_RUN,
@@ -1581,3 +1582,219 @@ def test_a_reference_of_pasted_prose_is_refused_on_characters_before_tokens() ->
     assert str(MAX_REFERENCE_CHARS) in message
     assert "character" in message
     assert "x" * 20 not in message
+
+
+# --------------------------------------------------------------------------- #
+# Holding aligned line starts to their source's stamps
+# --------------------------------------------------------------------------- #
+
+
+def _aligned_cue(text: str, words: list[tuple[float, float]]) -> dict[str, object]:
+    pieces = text.split()
+    assert len(pieces) == len(words)
+    return {
+        "start": words[0][0],
+        "end": words[-1][1],
+        "text": text,
+        "words": [
+            {"start": start, "end": end, "text": piece}
+            for piece, (start, end) in zip(pieces, words, strict=True)
+        ],
+    }
+
+
+#: The shape found on a real song: lines aligned about 0.6 s before their stamps,
+#: and the third line's first word handed a time from an earlier "Out", so it starts
+#: nineteen seconds early and is held across the whole gap.
+_STAMPED = [("Sing it low", 10.0), ("Sing it slow", 20.0), ("Out on the road", 180.0)]
+_ALIGNED = [
+    _aligned_cue("Sing it low", [(9.4, 9.8), (9.8, 10.2), (10.2, 11.0)]),
+    _aligned_cue("Sing it slow", [(19.4, 19.7), (19.7, 20.1), (20.1, 21.0)]),
+    _aligned_cue(
+        "Out on the road", [(161.45, 180.6), (180.6, 180.9), (180.9, 181.1), (181.1, 182.0)]
+    ),
+]
+
+
+def test_a_first_word_stretched_back_over_a_gap_is_held_to_its_stamp() -> None:
+    cues, report = alignment.anchor_line_starts(_STAMPED, _ALIGNED)  # type: ignore[arg-type]
+
+    assert report.applied and report.moved_lines == 1
+    assert report.offset == pytest.approx(-0.6)
+    moved = cues[2]
+    assert moved["start"] == pytest.approx(179.4)
+    assert moved["words"][0]["start"] == pytest.approx(179.4)
+    assert moved["words"][0]["end"] == 180.6, "only the start moves"
+    assert [cue["start"] for cue in cues[:2]] == [9.4, 19.4], "lines near their stamps stay"
+    assert _ALIGNED[2]["start"] == 161.45, "the input is not modified"
+
+
+def test_the_offset_is_a_median_that_one_bad_line_cannot_drag() -> None:
+    """With a mean, the nineteen-second outlier would shift every expected start by six."""
+    _cues, report = alignment.anchor_line_starts(_STAMPED, _ALIGNED)  # type: ignore[arg-type]
+    assert report.offset == pytest.approx(-0.6)
+
+
+def test_a_line_placed_early_as_a_whole_moves_to_its_stamp() -> None:
+    """Early, and finished before the stamp: the whole line moves forward to it.
+
+    The line keeps its length. It is not moved earlier than the aligner placed it.
+    """
+    aligned = [
+        _ALIGNED[0],
+        _ALIGNED[1],
+        _aligned_cue(
+            "Out on the road", [(170.0, 170.4), (170.4, 170.8), (170.8, 171.0), (171.0, 172.0)]
+        ),
+    ]
+    cues, report = alignment.anchor_line_starts(_STAMPED, aligned)  # type: ignore[arg-type]
+    assert report.applied and report.moved_lines == 1
+    moved = cues[2]
+    assert moved["start"] == pytest.approx(179.4)
+    assert moved["end"] == pytest.approx(181.4)
+    assert moved["end"] - moved["start"] == pytest.approx(2.0)
+    assert moved["start"] > 170.0
+    assert [word["start"] for word in moved["words"]] == pytest.approx([179.4, 179.8, 180.2, 180.4])
+    assert [cue["start"] for cue in cues[:2]] == [9.4, 19.4]
+
+
+def test_only_the_early_words_of_a_line_move() -> None:
+    """Two leading words sit early and the rest are already at the stamp.
+
+    The shape of a real line whose first words were matched to an earlier
+    occurrence while the tail was timed where the line is actually sung.
+    """
+    kept = [(178.2, 178.8), (178.8, 182.0)]
+    aligned = [
+        _ALIGNED[0],
+        _ALIGNED[1],
+        _aligned_cue("Out on the road", [(168.0, 169.0), (169.5, 170.5), *kept]),
+    ]
+    cues, report = alignment.anchor_line_starts(_STAMPED, aligned)  # type: ignore[arg-type]
+    assert report.moved_lines == 1
+    words = cues[2]["words"]
+    hi = kept[0][0]
+    assert words[0]["start"] == pytest.approx(hi - MIN_WORD_SECONDS * 2)
+    assert words[1]["end"] == pytest.approx(hi)
+    assert [(word["start"], word["end"]) for word in words[2:]] == kept
+    assert words[0]["start"] > 168.0
+
+
+def test_two_consecutive_early_lines_do_not_overlap() -> None:
+    """Two lines the transcript never heard, settled from the last one back.
+
+    Each moves to its stamp. The earlier one stops before the later one's new
+    start, because that start is known before the earlier line is placed.
+    """
+    stamped = [
+        ("One", 10.0),
+        ("Two", 20.0),
+        ("Three now", 30.0),
+        ("Four now", 40.0),
+        ("Five", 50.0),
+    ]
+    aligned = [
+        _aligned_cue("One", [(10.0, 11.0)]),
+        _aligned_cue("Two", [(20.0, 21.0)]),
+        _aligned_cue("Three now", [(12.0, 13.0), (13.0, 14.0)]),
+        _aligned_cue("Four now", [(22.0, 23.0), (23.0, 24.0)]),
+        _aligned_cue("Five", [(50.0, 51.0)]),
+    ]
+    cues, report = alignment.anchor_line_starts(stamped, aligned)  # type: ignore[arg-type]
+    assert report.applied and report.offset == pytest.approx(0.0)
+    assert report.moved_lines == 2
+    assert cues[2]["start"] == pytest.approx(30.0)
+    assert cues[2]["end"] == pytest.approx(32.0)
+    assert cues[3]["start"] == pytest.approx(40.0)
+    assert cues[3]["end"] == pytest.approx(42.0)
+    assert cues[2]["end"] <= cues[3]["start"]
+    assert cues[3]["end"] <= cues[4]["start"]
+    assert cues[0]["start"] == 10.0 and cues[4]["start"] == 50.0
+
+
+def test_a_line_with_no_room_before_the_next_stops_at_that_line() -> None:
+    """The next line starts too soon for this one to keep its length at its stamp."""
+    stamped = [("One", 10.0), ("Two", 20.0), ("Three words are here", 30.0), ("Four", 30.1)]
+    aligned = [
+        _aligned_cue("One", [(10.0, 11.0)]),
+        _aligned_cue("Two", [(20.0, 21.0)]),
+        _aligned_cue(
+            "Three words are here",
+            [(20.0, 21.0), (21.0, 22.0), (22.0, 23.0), (23.0, 25.0)],
+        ),
+        _aligned_cue("Four", [(30.1, 31.0)]),
+    ]
+    cues, report = alignment.anchor_line_starts(stamped, aligned)  # type: ignore[arg-type]
+    assert report.moved_lines == 1
+    moved = cues[2]
+    assert moved["start"] == pytest.approx(30.1 - MIN_WORD_SECONDS * 4)
+    assert moved["end"] == pytest.approx(30.1)
+    assert moved["start"] >= 20.0
+    assert moved["end"] <= cues[3]["start"]
+    assert cues[3]["start"] == 30.1
+
+
+def test_a_line_is_never_pulled_earlier_than_the_aligner_placed_it() -> None:
+    """The next line starts inside this one, so the minimum span would begin earlier.
+
+    The line still may not start before the aligner placed it.
+    """
+    stamped = [("One", 5.0), ("Two words", 30.0), ("Three", 10.02)]
+    aligned = [
+        _aligned_cue("One", [(5.0, 6.0)]),
+        _aligned_cue("Two words", [(10.0, 11.0), (11.0, 12.0)]),
+        _aligned_cue("Three", [(10.02, 11.0)]),
+    ]
+    cues, report = alignment.anchor_line_starts(stamped, aligned)  # type: ignore[arg-type]
+    assert report.offset == pytest.approx(0.0)
+    assert report.moved_lines == 1
+    assert cues[1]["start"] == pytest.approx(10.0)
+    assert cues[1]["end"] == pytest.approx(10.02)
+    assert cues[1]["start"] >= 10.0
+    assert cues[2]["start"] == pytest.approx(10.02)
+
+
+def test_a_line_that_runs_past_its_stamp_is_compressed_up_to_its_end() -> None:
+    """Every word starts early, and the line already ends after the stamp."""
+    aligned = [
+        _ALIGNED[0],
+        _ALIGNED[1],
+        _aligned_cue(
+            "Out on the road",
+            [(160.0, 165.0), (165.0, 170.0), (170.0, 175.0), (175.0, 185.0)],
+        ),
+    ]
+    cues, report = alignment.anchor_line_starts(_STAMPED, aligned)  # type: ignore[arg-type]
+    assert report.moved_lines == 1
+    moved = cues[2]
+    assert moved["start"] == pytest.approx(179.4)
+    assert moved["end"] == 185.0
+    assert moved["start"] > 160.0
+    assert [word["end"] for word in moved["words"]][-1] == 185.0
+
+
+def test_a_line_within_the_allowance_is_left_alone() -> None:
+    aligned = [
+        _ALIGNED[0],
+        _ALIGNED[1],
+        _aligned_cue(
+            "Out on the road", [(178.0, 180.6), (180.6, 180.9), (180.9, 181.1), (181.1, 182.0)]
+        ),
+    ]
+    cues, report = alignment.anchor_line_starts(_STAMPED, aligned)  # type: ignore[arg-type]
+    assert report.moved_lines == 0, "1.4 s early is inside the two-second allowance"
+    assert cues[2]["start"] == 178.0
+
+
+def test_lines_the_aligner_dropped_are_dropped_before_pairing() -> None:
+    stamped = [("[Chorus]", 5.0), ("   ", 6.0), *_STAMPED, ("(Instrumental)", 200.0)]
+    _cues, report = alignment.anchor_line_starts(stamped, _ALIGNED)  # type: ignore[arg-type]
+    assert report.applied and report.moved_lines == 1
+
+
+def test_lines_that_do_not_pair_are_reported_and_not_guessed_at() -> None:
+    for stamped in (_STAMPED[:2], [*_STAMPED[:2], ("Out on the highway", 180.0)], []):
+        cues, report = alignment.anchor_line_starts(stamped, _ALIGNED)  # type: ignore[arg-type]
+        assert not report.applied and report.moved_lines == 0 and report.offset == 0.0
+        assert cues == _ALIGNED
+    assert report.as_json() == {"applied": False, "offset": 0.0, "moved_lines": 0}

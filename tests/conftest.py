@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -77,3 +77,40 @@ def licensed_store(
     monkeypatch.setattr(licensed, "_kilix_json", store.answer)
     yield store
     licensed.forget_root()
+
+
+class FakeLrclib:
+    """LRCLIB, as far as the suite is concerned: a recorder in place of the network.
+
+    Autouse, so no test reaches lrclib.net. By default every request fails the way an
+    offline machine fails, which keeps every `auto` project in the suite on the path it
+    took before the route existed: a lookup that cannot complete records nothing. A test
+    that wants an answer sets ``answer`` to the JSON it should read, or to a function of
+    the requested URL returning it; one that wants the real HTTP client against a
+    loopback server restores ``real_fetch``.
+    """
+
+    def __init__(self, real_fetch: object) -> None:
+        self.real_fetch = real_fetch
+        self.urls: list[str] = []
+        self.answer: bytes | Exception | Callable[[str], bytes] | None = None
+
+    def fetch(self, url: str, *, timeout: float, limit: int) -> bytes:
+        from kilix_playalong.errors import ProviderUnavailableError
+
+        self.urls.append(url)
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        if self.answer is None:
+            raise ProviderUnavailableError("LRCLIB could not be reached")
+        data = self.answer(url) if callable(self.answer) else self.answer
+        return data[: limit + 1]
+
+
+@pytest.fixture(autouse=True)
+def lrclib_network(monkeypatch: pytest.MonkeyPatch) -> FakeLrclib:
+    from kilix_playalong.providers import lrclib
+
+    fake = FakeLrclib(lrclib._fetch)
+    monkeypatch.setattr(lrclib, "_fetch", fake.fetch)
+    return fake

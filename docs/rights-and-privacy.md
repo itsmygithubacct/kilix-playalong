@@ -12,6 +12,15 @@ determine ownership for you. Downloaded media, separated stems, lyrics, MIDI,
 tabs, and exports are derivative/private user content. They are never committed,
 uploaded, or used as telemetry by this application.
 
+Lyrics looked up on [LRCLIB](https://lrclib.net) are third-party content and are
+treated the same way: the project keeps a private copy, labelled with the entry
+id, the query and the time it was retrieved, and nothing redistributes it. No
+licence of this application or of its libraries covers those lyrics. The lookup
+sends the song's title and artist to lrclib.net in one or two requests, once per
+project; it happens only when no lyrics file, sidecar, tag or caption track
+answered first, and `--no-lyrics-lookup` or `--lyrics-source transcribe` turns it
+off.
+
 The player binds to `127.0.0.1` only, uses a random per-launch capability in its
 URL, validates the HTTP Host header, exposes a read-only route set, and sends a
 restrictive Content Security Policy. That capability is the only authenticator,

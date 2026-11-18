@@ -1,9 +1,10 @@
 """Bounded lyric ingestion, from every place lyrics arrive, in one cue shape.
 
-Lyrics reach this module from five untrusted places -- a downloaded caption
+Lyrics reach this module from six untrusted places -- a downloaded caption
 track, an ``.lrc`` sidecar sitting beside a local file, a lyrics tag carried
-inside the media itself, a file the user picked, and our own generated JSON --
-and leave it as one list of cues that both readers accept without repair.
+inside the media itself, a file the user picked, an entry looked up on LRCLIB,
+and our own generated JSON -- and leave it as one list of cues that both
+readers accept without repair.
 
 Two properties are load-bearing for those readers and are established here, not
 hoped for:
@@ -1598,6 +1599,64 @@ def embedded_lyrics_document(
     if embedded is None:
         return None
     return parse_embedded_lyrics(embedded, duration=duration)
+
+
+# --------------------------------------------------------------------------- #
+# Published lyrics looked up on LRCLIB
+# --------------------------------------------------------------------------- #
+
+
+def parse_lrclib_lyrics(
+    synced: str | None,
+    plain: str | None,
+    *,
+    duration: float,
+    source: str,
+) -> LyricsDocument:
+    """One LRCLIB entry's words as a document, carrying the words to align as well.
+
+    This is the one document that is timed *and* carries `lines`. LRCLIB's synced
+    lyrics are LRC: a stamp per line and nothing inside it, which is authored timing
+    but not word timing. So the cues keep those line stamps -- they are what the
+    project falls back to when forced alignment is unavailable or rejected -- and
+    `lines` holds the same lines, in sung order, for `pipeline` to align against the
+    transcript. An entry with only plain lyrics is the ordinary untimed case:
+    spread evenly, `estimated`, and the `-estimated` tail on its source id.
+
+    `source` is the id the caller wants recorded, ``lrclib:<id>``; this module
+    appends the tail itself, as it does for every untimed source it reads.
+    """
+
+    if not math.isfinite(duration) or duration <= 0:
+        raise InvalidInputError("lyrics duration must be finite and positive")
+    for text in (synced, plain):
+        if text is not None and len(text.encode("utf-8")) > MAX_LYRICS_BYTES:
+            raise InvalidInputError(
+                f"LRCLIB lyrics exceed the {_size_label(MAX_LYRICS_BYTES)} limit"
+            )
+    if synced and synced.strip():
+        cues = _normalize(_parse_lrc(synced, duration), duration, timed=True, authored_lines=True)
+        if cues:
+            return LyricsDocument(
+                cues=cues,
+                source=source,
+                language="unknown",
+                timing="authored",
+                lines=tuple(cue["text"] for cue in cues),
+            )
+    if plain and plain.strip():
+        spread, lines = _parse_plain(plain, duration)
+        cues = _normalize(spread, duration, timed=False)
+        if cues:
+            return LyricsDocument(
+                cues=cues,
+                source=source + _ESTIMATED_SUFFIX,
+                language="unknown",
+                timing="estimated",
+                lines=tuple(lines),
+                note=_UNTIMED_NOTE,
+            )
+    raise InvalidInputError("LRCLIB lyrics contain no usable lyric cues")
 
 
 # --------------------------------------------------------------------------- #

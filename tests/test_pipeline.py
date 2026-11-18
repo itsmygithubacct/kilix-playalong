@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import wave
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
@@ -1381,8 +1382,10 @@ def test_a_lyrics_tag_inside_the_media_becomes_the_lyrics(
     tmp_path: Path,
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
 ) -> None:
-    """A file that carries its own words must not be transcribed."""
+    """A file that carries its own words must not be transcribed, nor looked up."""
+    lrclib_network.answer = b"[]"
     _calls, whisper_models = _install_providers(monkeypatch, real_probe=True)
     song = make_uslt_mp3(tmp_path / "uslt.mp3", "[00:00.50]Tagged line\n[00:02.00]Second line")
 
@@ -1392,6 +1395,7 @@ def test_a_lyrics_tag_inside_the_media_becomes_the_lyrics(
     assert manifest["lyrics"]["route"] == "embedded"
     assert manifest["lyrics"]["source"] == "embedded-lrc"
     assert whisper_models == []
+    assert lrclib_network.urls == []
 
 
 @requires_ffmpeg
@@ -1399,6 +1403,7 @@ def test_an_lrc_beside_the_file_becomes_the_lyrics(
     tmp_path: Path,
     private_homes: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
 ) -> None:
     """The near-universal convention, found without the user naming it, and copied in."""
     _calls, whisper_models = _install_providers(monkeypatch, real_probe=True)
@@ -1411,6 +1416,7 @@ def test_an_lrc_beside_the_file_becomes_the_lyrics(
     assert manifest["lyrics"]["route"] == "sidecar"
     assert manifest["lyrics"]["source"] == "sidecar-lrc"
     assert whisper_models == []
+    assert lrclib_network.urls == []
     # Copied, so the project keeps working when the user tidies the folder.
     (tmp_path / "song.lrc").unlink()
     statuses: list[tuple[str, str]] = []
@@ -2202,3 +2208,449 @@ def test_a_failed_reacquisition_leaves_a_finished_project_exactly_as_it_was(
     for name in downstream:
         for artifact in after["stages"][name]["artifacts"]:
             assert (project_dir / artifact["path"]).is_file()
+
+
+# --------------------------------------------------------------------------- #
+# Published lyrics from LRCLIB, just before transcription
+# --------------------------------------------------------------------------- #
+
+#: What LRCLIB holds for the download stand-in: its title, its length, the two lines the
+#: transcript stand-in sings, stamped where they are sung.
+_LRCLIB_ENTRY: dict[str, object] = {
+    "id": 42,
+    "trackName": "Synthetic Song",
+    "artistName": "Synthetic Band",
+    "albumName": "",
+    "duration": 6.0,
+    "instrumental": False,
+    "plainLyrics": _SHEET,
+    "syncedLyrics": (
+        "[00:00.50] Hello darkness my old friend\n[00:03.00] I have come to talk with you again\n"
+    ),
+}
+
+
+def _lrclib_answer(*entries: dict[str, object]) -> bytes:
+    return json.dumps(list(entries)).encode()
+
+
+def _with_transcriber(monkeypatch: pytest.MonkeyPatch, **kwargs: Any) -> list[str]:
+    _calls, whisper_models = _install_providers(monkeypatch, **kwargs)
+    _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
+    _cache_whisper_model("medium.en")
+    return whisper_models
+
+
+def test_published_lyrics_are_looked_up_before_transcription(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """LRCLIB's words, the transcript's timing, and a record of where both came from."""
+    whisper_models = _with_transcriber(monkeypatch, cues=_TRANSCRIPT_CUES)
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+
+    assert len(lrclib_network.urls) == 1
+    assert manifest["lyrics"] is not None
+    assert manifest["lyrics"]["route"] == "lrclib"
+    assert manifest["lyrics"]["source"] == "lrclib:42-aligned"
+    lookup = manifest["lyrics"]["lookup"]
+    assert isinstance(lookup, dict)
+    assert lookup["provider"] == "lrclib" and lookup["id"] == 42
+    assert lookup["query"] == {"q": "Synthetic Song"}, "no artist reported, so the title alone"
+    assert lookup["timing"] == "aligned"
+    assert str(lookup["retrieved_at"]).endswith("+00:00")
+    assert whisper_models == ["medium.en"], "the words are LRCLIB's; their timing is not"
+    alignment = manifest["lyrics"]["alignment"]
+    assert isinstance(alignment, dict) and alignment["applied"] is True
+    assert alignment["anchor"] == {"applied": True, "offset": 0.0, "moved_lines": 0}
+
+    recorded = manifest["source"]["lrclib"]
+    assert isinstance(recorded, dict)
+    saved = project_dir / str(recorded["path"])
+    assert saved.stat().st_mode & 0o777 == 0o600
+    assert sha256_file(saved) == recorded["sha256"]
+    assert json.loads(saved.read_text()) == _LRCLIB_ENTRY
+    document = json.loads((project_dir / "lyrics" / "lyrics.json").read_text())
+    assert document["timing"] == "measured"
+    assert [cue["text"] for cue in document["cues"]] == [
+        "Hello darkness my old friend",
+        "I have come to talk with you again",
+    ]
+    # Lyric text reaches the saved copy and lyrics.json, and nothing a log or surface reads.
+    assert "darkness" not in json.dumps(load_manifest(project_dir))
+
+
+def test_a_resume_reads_the_saved_entry_and_never_asks_again(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    whisper_models = _with_transcriber(monkeypatch, cues=_TRANSCRIPT_CUES)
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+    project_dir, _manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    lrclib_network.urls.clear()
+    lrclib_network.answer = None  # offline from here on
+
+    statuses: list[tuple[str, str]] = []
+    resume(
+        project_dir,
+        PipelineOptions(rights_confirmed=True),
+        progress=lambda n, s, _d: statuses.append((n, s)),
+    )
+    assert all(status == "cached" for _name, status in statuses)
+
+    # A change that re-runs the lyrics stage still reads the project's own copy.
+    rerun = resume(project_dir, PipelineOptions(audio_source="mix", rights_confirmed=True))
+    assert rerun["lyrics"] is not None and rerun["lyrics"]["route"] == "lrclib"
+    assert lrclib_network.urls == []
+    assert whisper_models == ["medium.en", "medium.en"]
+
+
+def test_the_routes_before_lrclib_still_win_and_never_ask_it(
+    tmp_path: Path,
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """A supplied file and the publisher's captions are on this machine; LRCLIB is not.
+
+    The sidecar and the media's own tag are the file arm's, and their tests below
+    (`test_an_lrc_beside_the_file_becomes_the_lyrics`,
+    `test_a_lyrics_tag_inside_the_media_becomes_the_lyrics`) assert the same silence.
+    """
+    _with_transcriber(monkeypatch, cues=_TRANSCRIPT_CUES, subtitles=("source.en.vtt",))
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+
+    _dir, captioned = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    _dir, supplied = run_new(
+        PipelineOptions(url=_URL, lyrics_path=_sheet(tmp_path), rights_confirmed=True)
+    )
+
+    assert captioned["lyrics"] is not None and captioned["lyrics"]["route"] == "captions"
+    assert supplied["lyrics"] is not None and supplied["lyrics"]["route"] == "file"
+    assert lrclib_network.urls == []
+
+
+def test_an_unreachable_lrclib_falls_through_to_transcription_in_one_line(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    whisper_models = _with_transcriber(monkeypatch)
+
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+
+    assert len(lrclib_network.urls) == 1
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
+    note = manifest["stages"]["lyrics"]["note"]
+    assert note == "transcribed the vocals audio; LRCLIB skipped: LRCLIB could not be reached"
+    assert "lrclib" not in manifest["source"], "a failure records nothing"
+    assert whisper_models == ["medium.en"]
+
+
+def test_a_miss_falls_through_and_is_remembered_for_its_query(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    _with_transcriber(monkeypatch)
+    lrclib_network.answer = _lrclib_answer({**_LRCLIB_ENTRY, "duration": 200.0})
+
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
+    assert "LRCLIB had no lyrics matching" in manifest["stages"]["lyrics"]["note"]
+    recorded = manifest["source"]["lrclib"]
+    assert isinstance(recorded, dict) and recorded["id"] is None
+    assert recorded["queries"] == [{"q": "Synthetic Song"}]
+
+    lrclib_network.urls.clear()
+    resume(project_dir, PipelineOptions(audio_source="mix", rights_confirmed=True))
+    assert lrclib_network.urls == [], "the same question is not asked twice"
+
+    # The audio source stays mix so the finished transcription is still current.
+    # A new title is not a new question while that transcription stands.
+    resume(
+        project_dir,
+        PipelineOptions(audio_source="mix", title="Synthetic Song Renamed", rights_confirmed=True),
+    )
+    assert lrclib_network.urls == []
+    assert load_manifest(project_dir)["lyrics"]["route"] == "transcribe"  # type: ignore[index]
+
+    with pytest.raises(InvalidInputError, match="LRCLIB has no lyrics matching"):
+        resume(
+            project_dir,
+            PipelineOptions(
+                audio_source="mix",
+                title="Synthetic Song Explicit",
+                lyrics_source="lrclib",
+                rights_confirmed=True,
+            ),
+        )
+    assert len(lrclib_network.urls) == 1, "named explicitly, a new title is asked"
+    assert load_manifest(project_dir)["source"]["lrclib"]["queries"] == [  # type: ignore[index]
+        {"q": "Synthetic Song Explicit"}
+    ]
+
+
+def test_turning_the_lookup_off_keeps_every_route_off_the_network(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    _with_transcriber(monkeypatch, cues=_TRANSCRIPT_CUES)
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+
+    _dir, opted_out = run_new(PipelineOptions(url=_URL, lyrics_lookup=False, rights_confirmed=True))
+    _dir, transcribed = run_new(
+        PipelineOptions(url=_URL, lyrics_source="transcribe", rights_confirmed=True)
+    )
+
+    assert lrclib_network.urls == []
+    for manifest in (opted_out, transcribed):
+        assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
+        assert "lrclib" not in manifest["source"]
+        assert "LRCLIB" not in manifest["stages"]["lyrics"]["note"]
+    assert opted_out["settings"]["lyrics_lookup"] is False
+
+
+def test_an_explicit_lrclib_that_finds_nothing_fails_and_asks_once(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """Named, LRCLIB is the source or the run fails -- no quiet transcription instead.
+
+    Asked once although the plan is resolved twice: once to key the stage, where the
+    failure degrades the key, and again when the stage runs and raises it.
+    """
+    whisper_models = _with_transcriber(monkeypatch)
+    options = PipelineOptions(url=_URL, lyrics_source="lrclib", rights_confirmed=True)
+
+    lrclib_network.answer = b"[]"
+    project_dir, manifest = create_project(options)
+    with pytest.raises(InvalidInputError, match="LRCLIB has no lyrics matching"):
+        Pipeline(project_dir, manifest, options).run()
+    assert len(lrclib_network.urls) == 1
+    assert load_manifest(project_dir)["stages"]["lyrics"]["status"] == "error"
+
+    lrclib_network.urls.clear()
+    lrclib_network.answer = None
+    with pytest.raises(ProviderUnavailableError, match="LRCLIB could not be reached"):
+        resume(project_dir, options)
+    assert len(lrclib_network.urls) == 1, "named, a recorded miss is asked again"
+    error = load_manifest(project_dir)["stages"]["lyrics"]["error"]
+    assert error == "LRCLIB could not be reached"
+    assert whisper_models == []
+
+
+def test_lrclib_line_stamps_are_kept_when_alignment_is_rejected(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    _with_transcriber(monkeypatch, cues=_WRONG_CUES)
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["source"] == "lrclib:42"
+    assert manifest["lyrics"]["lookup"]["timing"] == "lrc-lines"  # type: ignore[index]
+    note = manifest["stages"]["lyrics"]["note"]
+    assert note.startswith("lyrics from lrclib; alignment rejected, the source's line timing kept")
+    document = json.loads((project_dir / "lyrics" / "lyrics.json").read_text())
+    assert document["timing"] == "authored"
+    assert [cue["start"] for cue in document["cues"]] == [0.5, 3.0]
+
+
+def test_a_plain_lrclib_entry_without_alignment_is_estimated(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    whisper_models = _with_transcriber(monkeypatch, cues=_TRANSCRIPT_CUES)
+    lrclib_network.answer = _lrclib_answer({**_LRCLIB_ENTRY, "syncedLyrics": None})
+
+    _dir, manifest = run_new(
+        PipelineOptions(url=_URL, align_supplied_text=False, rights_confirmed=True)
+    )
+
+    assert manifest["lyrics"] is not None
+    assert manifest["lyrics"]["source"] == "lrclib:42-estimated"
+    assert manifest["lyrics"]["lookup"]["timing"] == "estimated"  # type: ignore[index]
+    assert whisper_models == [], "alignment off: nothing asks for a transcript"
+
+
+def test_a_title_that_names_its_singer_finds_lyrics_the_uploader_would_not(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """Two requests, the second recorded as the one that found the entry, and no third ever."""
+    _with_transcriber(monkeypatch, cues=_TRANSCRIPT_CUES)
+    entry = {**_LRCLIB_ENTRY, "trackName": "Ain't No Reason", "artistName": "Brett Dennen"}
+
+    def answer(url: str) -> bytes:
+        return _lrclib_answer(entry) if "q=" in url else _lrclib_answer()
+
+    lrclib_network.answer = answer
+    options = PipelineOptions(
+        url=_URL,
+        title="Ain't no reason - Brett Dennen (Lyrics)",
+        artist="Some Uploader",
+        rights_confirmed=True,
+    )
+
+    project_dir, manifest = run_new(options)
+
+    assert len(lrclib_network.urls) == 2
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "lrclib"
+    lookup = manifest["lyrics"]["lookup"]
+    assert isinstance(lookup, dict) and lookup["query"] == {"q": "Ain't no reason - Brett Dennen"}
+    assert manifest["source"]["lrclib"]["queries"] == [  # type: ignore[index]
+        {"track_name": "Ain't no reason - Brett Dennen", "artist_name": "Some Uploader"},
+        {"q": "Ain't no reason - Brett Dennen"},
+    ]
+
+    lrclib_network.urls.clear()
+    resume(project_dir, PipelineOptions(audio_source="mix", rights_confirmed=True))
+    assert lrclib_network.urls == [], "the saved entry answers for both queries"
+
+
+def _pcm_wav(path: Path, seconds: float, rate: int = 8000) -> None:
+    """A real mono WAV of `seconds`, so a test can measure it back with `wave`."""
+    frames = round(seconds * rate)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle, wave.open(handle, "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(rate)
+        audio.writeframes(b"\x00\x00" * frames)
+
+
+def test_a_transcription_made_offline_is_not_looked_up_once_the_network_returns(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """Resume and rename keep the words. Re-running the stage, or naming LRCLIB, asks."""
+    _with_transcriber(monkeypatch)
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
+    assert "lrclib" not in manifest["source"]
+    assert len(lrclib_network.urls) == 1
+
+    lrclib_network.urls.clear()
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+    resumed = resume(project_dir, PipelineOptions(rights_confirmed=True))
+    renamed = resume(
+        project_dir, PipelineOptions(title="Synthetic Song Renamed", rights_confirmed=True)
+    )
+    assert lrclib_network.urls == []
+    assert resumed["lyrics"] is not None and resumed["lyrics"]["route"] == "transcribe"
+    assert renamed["lyrics"] is not None and renamed["lyrics"]["route"] == "transcribe"
+
+    # The rename stuck, so the entry has to be the song the project is now named.
+    lrclib_network.answer = _lrclib_answer({**_LRCLIB_ENTRY, "trackName": "Synthetic Song Renamed"})
+    # The reader itself has to answer while the transcription is still finished.
+    # A refusal is swallowed while the plan is keyed, and the stage then asks
+    # again only because opening the stage clears that finished status.
+    held = Pipeline(
+        project_dir,
+        load_manifest(project_dir),
+        PipelineOptions(lyrics_source="lrclib", rights_confirmed=True),
+    )
+    assert held._lrclib_lyrics(held._duration()) is not None
+    asked = resume(project_dir, PipelineOptions(lyrics_source="lrclib", rights_confirmed=True))
+    assert len(lrclib_network.urls) == 1
+    assert asked["lyrics"] is not None and asked["lyrics"]["route"] == "lrclib"
+
+
+def test_re_running_the_lyrics_stage_asks_lrclib_again(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    _with_transcriber(monkeypatch)
+    project_dir, _manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    lrclib_network.urls.clear()
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+
+    rerun = resume(project_dir, PipelineOptions(audio_source="mix", rights_confirmed=True))
+
+    assert len(lrclib_network.urls) == 1
+    assert rerun["lyrics"] is not None and rerun["lyrics"]["route"] == "lrclib"
+
+
+def test_a_stronger_recorded_transcription_is_not_looked_up_either(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """The recorded model outranks this machine, and that transcription still stands."""
+    _with_transcriber(monkeypatch)
+    _pin_hardware(monkeypatch, available_memory=64 * _GIB, cuda=False)
+    _cache_whisper_model("large-v3")
+    project_dir, manifest = run_new(PipelineOptions(url=_URL, rights_confirmed=True))
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["route"] == "transcribe"
+    assert _recorded_model(manifest) == "large-v3"
+
+    lrclib_network.urls.clear()
+    lrclib_network.answer = _lrclib_answer(_LRCLIB_ENTRY)
+    _pin_hardware(monkeypatch, available_memory=4 * _GIB, cuda=False)
+    kept = resume(project_dir, PipelineOptions(rights_confirmed=True))
+
+    assert lrclib_network.urls == []
+    assert kept["lyrics"] is not None and kept["lyrics"]["route"] == "transcribe"
+    assert _recorded_model(kept) == "large-v3"
+
+
+def test_the_lookup_measures_the_normalized_audio(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """6.4 s of audio, not the source's listed 6 s, and the entry is still parsed at 6 s."""
+    _with_transcriber(monkeypatch)
+
+    def normalize(_source: Path, output: Path, **_kwargs: object) -> Path:
+        _pcm_wav(output, 6.4)
+        return output
+
+    monkeypatch.setattr("kilix_playalong.pipeline.media.normalize", normalize)
+    lrclib_network.answer = _lrclib_answer(
+        {**_LRCLIB_ENTRY, "id": 60, "duration": 6.0},
+        {**_LRCLIB_ENTRY, "id": 64, "duration": 6.4},
+    )
+
+    project_dir, manifest = run_new(
+        PipelineOptions(url=_URL, align_supplied_text=False, rights_confirmed=True)
+    )
+
+    assert manifest["lyrics"] is not None
+    assert manifest["lyrics"]["source"] == "lrclib:64"
+    document = json.loads((project_dir / "lyrics" / "lyrics.json").read_text())
+    assert document["cues"][-1]["end"] == pytest.approx(6.0)
+
+
+def test_an_unreadable_normalized_audio_uses_the_source_length(
+    private_homes: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    lrclib_network: Any,
+) -> None:
+    """The stand-in writes bytes that are not a WAV. The listed length still chooses."""
+    _with_transcriber(monkeypatch)
+    lrclib_network.answer = _lrclib_answer(
+        {**_LRCLIB_ENTRY, "id": 5, "duration": 0.5},
+        {**_LRCLIB_ENTRY, "id": 60, "duration": 6.0},
+        {**_LRCLIB_ENTRY, "id": 64, "duration": 6.4},
+    )
+
+    _project_dir, manifest = run_new(
+        PipelineOptions(url=_URL, align_supplied_text=False, rights_confirmed=True)
+    )
+
+    assert manifest["lyrics"] is not None and manifest["lyrics"]["source"] == "lrclib:60"

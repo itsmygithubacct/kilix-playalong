@@ -88,6 +88,7 @@ from .pipeline import (
     LYRIC_SOURCE_CAPTIONS,
     LYRIC_SOURCE_EMBEDDED,
     LYRIC_SOURCE_FILE,
+    LYRIC_SOURCE_LRCLIB,
     LYRIC_SOURCE_SIDECAR,
     LYRIC_SOURCE_TRANSCRIBE,
     valid_tuning,
@@ -134,6 +135,7 @@ BACKEND_FIELDS: Mapping[str, str] = {
     "whisper_model": "whisper_model",
     "audio_source": "audio_source",
     "align_supplied_text": "align_supplied_text",
+    "lyrics_lookup": "lyrics_lookup",
     "tuning": "tuning",
     "max_fret": "max_fret",
     "note_confidence": "note_confidence",
@@ -603,6 +605,17 @@ def _lyrics_source_arms(machine: _Machine) -> tuple[Choice, ...]:
             available=local_file_reason is None,
             unavailable_reason=local_file_reason,
         ),
+        # Not gated, and not probed: whether LRCLIB answers is a network question, and
+        # describing this machine asks nothing of the network. The route fails at run
+        # time in its own words when it cannot reach the service.
+        Choice(
+            value=LYRIC_SOURCE_LRCLIB,
+            label="Published lyrics from LRCLIB",
+            help=(
+                "Looks the title and artist up on lrclib.net and keeps an entry only if its "
+                "length matches the audio. The words are then timed against the singing."
+            ),
+        ),
         Choice(
             value=LYRIC_SOURCE_TRANSCRIBE,
             label="Transcribe the singing",
@@ -635,8 +648,9 @@ def _lyrics_source_choices(machine: _Machine) -> tuple[Choice, ...]:
             value=LYRIC_SOURCE_AUTO,
             label="Whatever is best available",
             help=(
-                "A supplied file first, then the source's own captions, then transcription. "
-                "Degrades to whatever this machine can actually do."
+                "A supplied file first, then the source's own captions, then published "
+                "lyrics from LRCLIB, then transcription. Degrades to whatever this machine "
+                "can actually do."
             ),
             available=auto_reason is None,
             unavailable_reason=auto_reason,
@@ -766,6 +780,18 @@ def _lyrics_group(machine: _Machine) -> OptionGroup:
                 choices=_lyrics_source_choices(machine),
             ),
             OptionSpec(
+                id="lyrics_lookup",
+                label="Look lyrics up on LRCLIB",
+                type="bool",
+                default=True,
+                stage="lyrics",
+                help=(
+                    "Lets the automatic choice ask lrclib.net for this song's published "
+                    "lyrics, sending only the title and artist. Off, nothing but the "
+                    "download itself uses the network; choosing LRCLIB above asks anyway."
+                ),
+            ),
+            OptionSpec(
                 id="lyrics_path",
                 label="Lyrics file",
                 type="path",
@@ -882,9 +908,10 @@ def _lyrics_group(machine: _Machine) -> OptionGroup:
                 default=True,
                 stage="lyrics",
                 help=(
-                    "Only affects lyrics that arrive without timings. On, they are placed "
-                    "against the audio; off, they are spread evenly across the song, which "
-                    "drifts badly."
+                    "Only affects lyrics that arrive without timings, and LRCLIB's, whose "
+                    "line stamps time no word. On, they are placed against the audio; off, "
+                    "untimed words are spread evenly across the song, which drifts badly, "
+                    "and LRCLIB's keep their line stamps."
                 ),
                 advanced=True,
             ),

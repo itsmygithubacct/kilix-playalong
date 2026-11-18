@@ -31,6 +31,51 @@ CUDA or at least 10 GiB of memory is available, and `medium.en` otherwise.
 `medium.en` transcribes English only; a project that asks for another language
 needs `large-v3`. An explicit model name always overrides this selection.
 
+## Where the lyrics come from
+
+`--lyrics-source auto`, the default, takes the first of these that answers:
+
+1. a lyrics file passed with `--lyrics`;
+2. an `.lrc` sidecar beside a local source file;
+3. a lyrics tag inside a local source file;
+4. the video's own caption track;
+5. published lyrics from [LRCLIB](https://lrclib.net), looked up by title and
+   artist;
+6. a faster-whisper transcription of the vocals.
+
+Each can be named instead: `file`, `sidecar`, `embedded`, `captions`, `lrclib`
+or `transcribe`. A named source that has nothing to offer fails rather than
+falling back to another one.
+
+The LRCLIB lookup is the only lyric route that uses the network. It sends an
+HTTPS request carrying the title (with asides such as "(Official Video)" and a
+leading "Artist - " removed) and the artist, with a `kilix-playalong/VERSION`
+User-Agent and nothing else. An entry is used only when its title and artist
+match and its length is within 10 seconds of the normalized audio
+(`media/normalized.wav`). A source's listed length is often a whole number of
+seconds, which is enough to pick a different recording; if the normalized file
+cannot be read, that listed length is used instead. The chosen entry is still
+parsed against the listed length. When that finds nothing and the title reads
+"Song - Artist" (or "Artist - Song"), one second request sends the whole title
+instead, because a video's artist is often only its uploader; the entry's artist
+may then match either half of the title. The chosen entry is saved privately in
+the project as `source/lyrics-lrclib.json`, and a resume reuses it without asking
+again; a miss is remembered for the same title and artist. When LRCLIB cannot be
+reached, `auto` transcribes instead and the lyrics stage note says why. A later
+`auto` run keeps that finished transcription and does not ask again: a resume, a
+rename, and a project that was made offline. A change that re-runs the lyrics
+stage, such as `--audio-source`, does ask, and `--lyrics-source lrclib` always
+does. `--no-lyrics-lookup` keeps `auto` off the network, and `--lyrics-source
+transcribe` never contacts LRCLIB.
+
+LRCLIB supplies the words; faster-whisper still runs, to time each word against
+the singing. If that alignment cannot run or is rejected, the entry's own line
+timings are kept, or, for an entry without them, the lines are spread evenly.
+The manifest records which under `lyrics.lookup.timing` (`aligned`, `lrc-lines`
+or `estimated`), beside the entry id, the query and when it was retrieved; the
+lyrics carry the source id `lrclib:ID`, with `-aligned` once the words are
+timed.
+
 The create command prints the project id and printable export path. An
 interrupted project resumes from verified artifacts:
 

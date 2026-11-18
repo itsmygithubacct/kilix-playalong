@@ -11,7 +11,7 @@ jobs, reads arbitrary files, or talks to third-party services.
 | Download | locked `yt-dlp` module | one source media file and optional VTT captions |
 | Normalize | FFmpeg | 44.1 kHz stereo PCM WAV |
 | Separate | pinned Demucs revision | independently addressable lossless stems |
-| Lyrics | captions, supplied text, or faster-whisper | versioned timed-cue JSON |
+| Lyrics | captions, supplied text, LRCLIB lookup, or faster-whisper | versioned timed-cue JSON |
 | Transcribe guitar | Basic Pitch ONNX child | MIDI and stable note-event JSON |
 | Tablature | internal deterministic dynamic program | timed string/fret JSON and ASCII tab |
 | Export | internal renderer | self-contained printable HTML |

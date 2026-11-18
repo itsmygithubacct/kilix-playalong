@@ -4,7 +4,8 @@ Kilix Playalong turns a YouTube song URL into a private guitar-practice project:
 independently controllable audio stems, timed lyrics, a MIDI transcription of
 the isolated guitar stem, a timed guitar tab, and a self-contained printable
 song sheet. Processing stays on the local machine after the explicitly
-requested download.
+requested download; the one other request is an optional LRCLIB lyrics lookup by
+title and artist, which `--no-lyrics-lookup` turns off.
 
 Installable on demand from the Kilix content catalog as `playalong`
 (`kilix install playalong`). `kilix playalong [ARGS]` installs the pinned
@@ -23,8 +24,9 @@ boundaries.
 
 - Takes a YouTube link or a local audio or video file, after an explicit
   `--i-have-rights` confirmation.
-- Separates six stems with Demucs, times lyrics from captions, supplied text
-  or faster-whisper, and transcribes the guitar stem to MIDI with Basic Pitch.
+- Separates six stems with Demucs, times lyrics from captions, supplied text,
+  LRCLIB's published lyrics or faster-whisper, and transcribes the guitar stem
+  to MIDI with Basic Pitch.
 - Infers string and fret positions for standard, Drop D or DADGAD tuning and
   writes a timed tab.
 - Plays the stems together in a loopback web player with synchronized lyrics
@@ -112,7 +114,7 @@ link or file --> download (yt-dlp) --> normalize (FFmpeg) --> separate (Demucs)
                                                                   |
         songbook / HTML / ASCII <-- tab <-- guitar MIDI (Basic Pitch)
                                      ^
-                     lyrics (captions, text, faster-whisper)
+                 lyrics (captions, text, LRCLIB, faster-whisper)
 
 project.state: provider, settings fingerprint and SHA-256 for every stage
 ```
