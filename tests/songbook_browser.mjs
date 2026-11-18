@@ -32,7 +32,7 @@ try {
     [path.join(repo,'tests/browser_fixture.py'),directory],{cwd:repo,stdio:'inherit'});
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
   const origin=`http://127.0.0.1:${server.address().port}`;
-  browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_PATH || undefined,args:['--disable-gpu']});
+  browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_PATH || undefined,args:['--disable-gpu','--mute-audio']});
   const context=await browser.newContext({viewport:{width:1440,height:1000},acceptDownloads:true});
   const page=await context.newPage(), errors=[];
   page.on('pageerror',error=>errors.push(error.message));
