@@ -741,9 +741,22 @@ def test_every_option_carries_a_reason_exactly_when_it_is_unavailable() -> None:
             assert choice.available == (choice.unavailable_reason is None), choice.value
 
 
-def test_describing_this_machine_never_verifies_a_model(licensed_store: Any) -> None:
-    """Verifying re-hashes gigabytes; an intake screen only checks that files are there."""
+def test_describing_this_machine_never_verifies_a_model(
+    licensed_store: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verifying re-hashes gigabytes; an intake screen only checks that files are there.
 
+    The provider packages are pinned present. The probe asks about a model's
+    weights only once the package that runs it is installed, so in the base
+    environment (`make setup`, no ML extras) the document would make no Kilix
+    call at all and the assertion could not tell a `list` from a `verify`. The
+    store, `licensed` and `transcription`'s model lookups stay real.
+    """
+
+    monkeypatch.setattr(transcription, "is_available", lambda: True)
+    monkeypatch.setattr(separation, "is_available", lambda: True)
+    monkeypatch.setattr(basic_pitch, "is_available", lambda: True)
+    monkeypatch.setattr(transcription, "cuda_available", lambda: False)
     licensed_store.calls.clear()
     build_options_document()
     assert licensed_store.calls and all(call == ("list",) for call in licensed_store.calls)
